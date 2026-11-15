@@ -105,17 +105,15 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.16: en 3.1.15 ya no se cerraba el juego y el .txd se metia en la
-// cola (estado 2), pero al aplicar la skin el estado volvia a 1 y la skin
-// seguia en blanco. Dos causas posibles: (a) un cambio de nivel/partida
-// vacia la cola despues del registro, y al aplicar RequestModel solo ponia
-// estado 1 sin volver a meter el .txd en la cola; (b) el personaje se crea
-// con el .txd sin cargar y se queda en blanco aunque el .txd cargue
-// despues. La 3.1.16 ataca las dos: RequestTxd ahora tambien vuelve a meter
-// el .txd en la cola (QueueModel) cada vez que se pide, y ApplySkin, para
-// skins propias, espera a que el .txd este cargado (estado 3 o 4, nuevo
-// TxdLoaded) antes de pedir el .dff, hasta ~5 s; si no carga, se aplica
-// igual (se vera en blanco, como antes).
+// 3.1.17 (CORRECCION DEL CONGELAMIENTO DE 3.1.16): QueueModel ya no vuelve
+// a meter un modelo que ya esta en la cola. En 3.1.16, al aplicar la skin,
+// RequestTxd (con QueueModel) se llamaba dos veces para el mismo .txd (una
+// en la espera de ApplySkin y otra tras RequestSpecialChar), y el .txd ya
+// estaba en la cola desde el registro: meterlo otra vez hacia que su +0
+// apuntara a si mismo (bucle en la lista doblemente enlazada) y el juego
+// se congelaba dentro de GetNextFileOnCd al recorrer la cola. Ahora
+// QueueModel recorre la lista desde la cabeza siguiendo +0 y, si el modelo
+// ya esta, devuelve true sin tocar nada.
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -629,6 +627,18 @@ static bool QueueModel(int modelId) {
     char* info = (char*)arr + (uintptr_t)modelId * 0x14;
     int16_t oldFirst = *(int16_t*)head;            // +0 del centinela: primer modelo (o -1 si vacia)
     if (oldFirst < -1 || oldFirst > 100000) { Log("  cola de carga: el primer modelo %d no es sano: no se mete en la cola", (int)oldFirst); return false; }
+    // Si el modelo YA esta en la cola, no se vuelve a meter (3.1.17): meterlo
+    // dos veces hace que su +0 apunte a si mismo (bucle en la lista) y el
+    // juego se congela dentro de GetNextFileOnCd al recorrer la cola. Se
+    // recorre la lista desde la cabeza siguiendo +0 hasta encontrarlo, o
+    // hasta llegar al final (-1) o a la cabeza; con tope para no dar vueltas
+    // si la cola ya estuviera corrupta.
+    int16_t cur = oldFirst;
+    for (int i = 0; i < 100000 && cur != -1 && (intptr_t)cur != headIdx; i++) {
+        if (cur == modelId) return true;           // ya esta en la cola: no se toca
+        if (cur < 0 || cur > 100000) break;        // indice raro: salirse
+        cur = *(int16_t*)((char*)arr + (uintptr_t)(uint16_t)cur * 0x14 + 0);
+    }
     *(int16_t*)(info + 0) = oldFirst;              // el modelo apunta al primero viejo
     *(int16_t*)(info + 2) = (int16_t)headIdx;      // el modelo apunta atras al centinela
     *(int16_t*)head = (int16_t)modelId;            // el centinela apunta al modelo
