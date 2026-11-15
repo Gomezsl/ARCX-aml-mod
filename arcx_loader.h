@@ -88,6 +88,22 @@
 // Ahora LoadImgDirectory hace lo mismo que el juego: trunca en '.' y solo
 // mete los .dff (los .txd NO van al CDirectory; sus texturas son el
 // siguiente paso, registrandolos en el CTxdStore como hace LoadCdDirectory).
+//
+// 3.1.11: los .txd SI se registran, en el CTxdStore (no en el CDirectory).
+// LoadCdDirectory, para un .txd, hace: FindTxdSlot(nombre) y si no existe
+// AddTxdSlot(nombre, rutaIMG, false) -> huecoTxd; modelId = huecoTxd +
+// 0x4E20; y rellena CStreamingInfo[modelId] (imagen = slot del IMG en +7,
+// campo +6 = 0, SetCdPosnAndSize(offset SIN el slot, tamano)). El .dff se
+// puso en 3.1.10 pero se veia en blanco porque el .txd no estaba registrado:
+// RequestSpecialModel busca el txd con FindTxdSlot(nombre de la skin) y, si
+// no lo encuentra, usa el txd por defecto (sin las texturas de la skin).
+// La base del array CStreamingInfo es el global 0x84dbd0 (sin simbolo: se
+// localiza escaneando LoadCdDirectory con adrp a 0x84d000 + ldr #0xbd0,
+// verificado unico en LoadCdDirectory y en RequestSpecialModel, que lo lee
+// dos veces). Los campos del CStreamingInfo (20 bytes): +4 campo (0xFFFF al
+// pedir un modelo), +6 byte (0), +7 byte indice de imagen, +8 offset en
+// sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
+// "tamano" y comprueba para saber si ya esta puesto).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -472,6 +488,100 @@ static void InitCdDirectory(void* loadCdDirectoryFn, void (*addItem)(void*, cons
     }
 }
 
+// ---- CTxdStore + CStreamingInfo (para registrar los .txd propios) ----
+// El .txd no va al CDirectory: va al CTxdStore (por nombre) y su posicion en
+// el IMG va al CStreamingInfo[modelId] (modelId = huecoTxd + 0x4E20), para
+// que el sistema de streaming pueda leerlo. Todo es operacion de registro
+// (sin tocar el acelerador ni cargar niveles): seguro en partida.
+static uintptr_t g_streamInfoGlobal = 0;   // direccion del global con la base del array CStreamingInfo (0 = no localizado)
+static int (*g_txdFindSlot)(const char*) = nullptr;                        // CTxdStore::FindTxdSlot(nombre) -> hueco o -1
+static int (*g_txdAddSlot)(const char*, const char*, bool) = nullptr;     // CTxdStore::AddTxdSlot(nombre, rutaIMG, false) -> hueco
+static void (*g_infoSetCdPosnAndSize)(void*, uint32_t, uint32_t) = nullptr; // CStreamingInfo::SetCdPosnAndSize(this, offset, tamano)
+
+static uintptr_t FindStreamingInfoGlobal(void* loadCdDirectoryFn) {
+    if (!loadCdDirectoryFn) return 0;
+    const uint32_t* code = (const uint32_t*)loadCdDirectoryFn;
+    const uintptr_t base = (uintptr_t)loadCdDirectoryFn;
+    for (int i = 0; i < 0x13C; i++) {   // LoadCdDirectory mide ~0x500 bytes
+        uint32_t w = code[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;   // adrp: bit31=1, bit28=0
+        int32_t imm = (int32_t)(((w >> 5) & 0x7FFFF) << 2) | (int32_t)((w >> 29) & 0x3);
+        if (imm & 0x100000) imm -= 0x200000;   // extension de signo (21 bits)
+        uintptr_t page = (base + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF;
+        uintptr_t target = page + ((uintptr_t)imm << 12);
+        // OJO: NO se comprueba que target sea 0x84d000: el .so es independiente
+        // de posicion y en el juego carga en una base distinta de 0, asi que
+        // target es base+0x84d000. El par adrp + ldr #0xbd0 es UNICO en
+        // LoadCdDirectory (verificado), asi que basta con el.
+        int rd = (int)(w & 0x1F);
+        for (int j = 1; j <= 8; j++) {   // el ldr esta hasta 8 instrucciones despues del adrp
+            uint32_t w2 = code[i + j];
+            if ((w2 & 0xFFC00000u) != 0xF9400000u) continue;   // ldr (offset sin signo, 64 bits)
+            uint32_t imm12 = (w2 >> 10) & 0xFFF;
+            int rn = (int)((w2 >> 5) & 0x1F);
+            if (imm12 * 8 == 0xbd0 && rn == rd) return target + 0xbd0;   // global 0x84dbd0
+        }
+    }
+    Log("no se pudo localizar el array CStreamingInfo en el codigo de LoadCdDirectory: los .txd propios no tendran texturas");
+    return 0;
+}
+
+static void* GetStreamingInfoArray() {
+    if (!g_streamInfoGlobal) return nullptr;
+    void* arr = *(void**)g_streamInfoGlobal;
+    return arr;   // la base del array CStreamingInfo (elementos de 20 bytes)
+}
+
+static void InitTxd(void* loadCdDirectoryFn, int (*findSlot)(const char*), int (*addSlot)(const char*, const char*, bool), void (*setPosnAndSize)(void*, uint32_t, uint32_t)) {
+    g_txdFindSlot = findSlot;
+    g_txdAddSlot = addSlot;
+    g_infoSetCdPosnAndSize = setPosnAndSize;
+    g_streamInfoGlobal = FindStreamingInfoGlobal(loadCdDirectoryFn);
+    if (g_streamInfoGlobal) {
+        void* arr = GetStreamingInfoArray();
+        if (arr) Log("array CStreamingInfo localizado en %p (global %p)", arr, (void*)g_streamInfoGlobal);
+        else Log("array CStreamingInfo aun no listo (global %p): se reintentara al registrar el IMG", (void*)g_streamInfoGlobal);
+    }
+}
+
+// Registra un .txd propio en el CTxdStore y rellena su CStreamingInfo, como
+// hace LoadCdDirectory para los .txd (0x557a04-0x557b78). name ya viene
+// truncado en '.' ("suk"); imgPath es la ruta resuelta del IMG propio;
+// rawOffset es el offset en sectores SIN el slot (el slot va aparte, en el
+// byte +7 del CStreamingInfo); size es el tamano en sectores (con la regla
+// del juego: si la mitad alta en +6 es distinta de 0, esa es el tamano).
+// Los campos se escriben SIEMPRE (no solo si GetCdPosnAndSize dice que no
+// estan): tras cargar una partida nueva el slot cambia y el valor viejo
+// quedaria apuntando al slot anterior. Si el nombre ya estaba registrado
+// (por ejemplo, en un re-registro), se reutiliza su hueco.
+// Devuelve true si el .txd quedo registrado (o ya lo estaba con sus datos
+// puestos); false si falta alguna funcion o no se localizo el array.
+static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffset, uint32_t size, int slot) {
+    if (!g_txdFindSlot || !g_txdAddSlot) {
+        static bool said = false;
+        if (!said) { said = true; Log("sin FindTxdSlot/AddTxdSlot: los .txd propios no se registraran (las skins se veran sin texturas)"); }
+        return false;
+    }
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) {
+        txdSlot = g_txdAddSlot(name, imgPath, false);
+        if (txdSlot < 0) { Log("no se pudo registrar el .txd '%s' en el CTxdStore", name); return false; }
+    }
+    if (!g_infoSetCdPosnAndSize) {
+        Log("sin SetCdPosnAndSize: el .txd '%s' quedo registrado por nombre pero sin sus datos (no se veran sus texturas)", name);
+        return false;
+    }
+    void* arr = GetStreamingInfoArray();
+    if (!arr) { Log("sin array CStreamingInfo: el .txd '%s' quedo registrado por nombre pero sin sus datos", name); return false; }
+    int modelId = txdSlot + 0x4e20;   // el juego numera los modelos de .txd desde 0x4E20
+    char* info = (char*)arr + (uintptr_t)modelId * 0x14;   // CStreamingInfo: 20 bytes por modelo
+    info[7] = (char)slot;             // indice de imagen (el slot del IMG propio)
+    info[6] = 0;                      // campo +6 a 0, como hace el juego
+    g_infoSetCdPosnAndSize(info, rawOffset, size);   // +8 offset, +12 tamano
+    Log("txd '%s' registrado (hueco %d, modelo %d, slot %d, offset %u, tamano %u sectores)", name, txdSlot, modelId, slot, rawOffset, size);
+    return true;
+}
+
 // Mete el directorio del IMG propio en el CDirectory del juego, entrada por
 // entrada, con CDirectory::AddItem (sin pasar por LoadCdDirectory, que en
 // partida se cae en GetEntry). Lee el IMG que ARCX mismo escribio (ruta
@@ -482,9 +592,9 @@ static void InitCdDirectory(void* loadCdDirectoryFn, void (*addItem)(void*, cons
 // IMPORTANTE (3.1.10): el nombre se trunca en el primer '.' antes de meterlo,
 // exactamente como hace LoadCdDirectory (0x557bcc-0x557bf8): "suk.dff" se
 // guarda como "suk", porque RequestSpecialModel busca con FindItem el nombre
-// SIN extension. Y solo los .dff van al CDirectory: los .txd van al
-// CTxdStore (no se meten aqui; si se metieran, FindItem encontraria el .txd
-// en vez del .dff). Las entradas que ya estan (re-registro tras cargar
+// SIN extension. Los .dff van al CDirectory; los .txd NO van al CDirectory,
+// se registran en el CTxdStore con RegisterTxd (3.1.11) para que la skin
+// tenga sus texturas. Las entradas que ya estan (re-registro tras cargar
 // partida) se saltan con FindItem, para no duplicarlas. AddItem se cae si el
 // CDirectory esta lleno: se comprueba la capacidad antes (+8 capacidad,
 // +12 conteo).
@@ -501,7 +611,7 @@ static bool LoadImgDirectory(int slot, void* cdDir) {
     int32_t cap = *(int32_t*)((char*)cdDir + 8);
     int32_t cur = *(int32_t*)((char*)cdDir + 12);
     if (cur + (int32_t)count > cap) { fclose(f); Log("el CDirectory del juego esta lleno (%d/%d): no caben las %u entradas del IMG propio", cur, cap, count); return false; }
-    int added = 0, skipped = 0, notDff = 0;
+    int added = 0, skipped = 0, txdOk = 0, txdFail = 0, other = 0;
     for (uint32_t i = 0; i < count; i++) {
         uint8_t ent[32];
         if (fread(ent, 1, 32, f) != 32) { ok = false; break; }
@@ -512,21 +622,31 @@ static bool LoadImgDirectory(int slot, void* cdDir) {
         if (!dot) continue;   // sin extension: el juego lo ignora
         size_t namelen = (size_t)(dot - name);
         if (namelen == 0 || namelen >= 21) continue;   // el juego ignora nombres de 0 o >= 21 caracteres antes del '.'
-        if (strncasecmp(dot + 1, "dff", 3) != 0 || dot[4] != '\0') { notDff++; continue; }   // solo .dff va al CDirectory (los .txd van al CTxdStore)
-        *dot = '\0';   // "suk.dff" -> "suk": asi lo guarda el juego y asi lo busca RequestSpecialModel
-        if (g_cdDirFindItem) {
-            uint32_t off = 0, sz = 0;
-            if (g_cdDirFindItem(cdDir, name, &off, &sz)) { skipped++; continue; }   // ya esta: no se duplica
+        bool isDff = strncasecmp(dot + 1, "dff", 3) == 0 && dot[4] == '\0';
+        bool isTxd = strncasecmp(dot + 1, "txd", 3) == 0 && dot[4] == '\0';
+        if (!isDff && !isTxd) { other++; continue; }   // solo .dff y .txd se registran (el resto no va a ningun lado)
+        *dot = '\0';   // "suk.dff" -> "suk", "suk.txd" -> "suk": asi lo guarda el juego y asi lo busca RequestSpecialModel
+        if (isDff) {
+            if (g_cdDirFindItem) {
+                uint32_t off = 0, sz = 0;
+                if (g_cdDirFindItem(cdDir, name, &off, &sz)) { skipped++; continue; }   // ya esta: no se duplica
+            }
+            uint32_t off = *(uint32_t*)ent;
+            off |= ((uint32_t)slot << 24);
+            *(uint32_t*)ent = off;
+            g_cdDirAddItem(cdDir, ent);
+            added++;
+        } else {   // .txd: al CTxdStore, no al CDirectory
+            uint32_t rawOff = *(uint32_t*)ent;   // offset SIN el slot (el slot va aparte, en el byte +7 del CStreamingInfo)
+            uint16_t sizeHi = *(uint16_t*)(ent + 6);
+            uint32_t size = sizeHi != 0 ? sizeHi : *(uint16_t*)(ent + 4);   // regla del juego: si la mitad alta es distinta de 0, esa es el tamano
+            if (RegisterTxd(name, g_resolvedPath.c_str(), rawOff, size, slot)) txdOk++;
+            else txdFail++;
         }
-        uint32_t off = *(uint32_t*)ent;
-        off |= ((uint32_t)slot << 24);
-        *(uint32_t*)ent = off;
-        g_cdDirAddItem(cdDir, ent);
-        added++;
     }
     fclose(f);
     if (!ok) { Log("el IMG propio se leyo incompleto: su directorio quedo a medias"); return false; }
-    Log("directorio del IMG cargado en el juego (slot %d): %d .dff nuevos, %d ya estaban, %d no-.dff (van al CTxdStore, no al CDirectory)", slot, added, skipped, notDff);
+    Log("directorio del IMG cargado en el juego (slot %d): %d .dff nuevos, %d ya estaban, %d .txd registrados, %d .txd sin registrar, %d otros ignorados", slot, added, skipped, txdOk, txdFail, other);
     return true;
 }
 

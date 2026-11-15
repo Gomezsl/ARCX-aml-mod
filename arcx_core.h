@@ -33,6 +33,9 @@ static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModel
 static int   (*AddImageToList)(const char*, bool);        // CStreaming::AddImageToList (opcional: registra el IMG propio; devuelve el slot)
 static void (*CdDirAddItem)(void*, const void*);                     // CDirectory::AddItem (opcional: mete una entrada en el CDirectory del juego)
 static int  (*CdDirFindItem)(void*, const char*, uint32_t*, uint32_t*); // CDirectory::FindItem (opcional: busca una entrada en el CDirectory; 1 = esta)
+static int  (*TxdFindSlot)(const char*);                        // CTxdStore::FindTxdSlot (opcional: busca un .txd por nombre; -1 = no esta)
+static int  (*TxdAddSlot)(const char*, const char*, bool);     // CTxdStore::AddTxdSlot (opcional: registra un .txd propio; devuelve el hueco)
+static void (*InfoSetCdPosnAndSize)(void*, uint32_t, uint32_t); // CStreamingInfo::SetCdPosnAndSize (opcional: pone offset/tamano de un .txd)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
@@ -869,12 +872,16 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(AddImageToList,                  "_ZN10CStreaming14AddImageToListEPKcb");   // opcional: registra el IMG propio de ARCXLoader (devuelve el slot)
     SYM(CdDirAddItem,                    "_ZN10CDirectory7AddItemERKNS_13DirectoryInfoE");  // opcional: mete una entrada en el CDirectory del juego
     SYM(CdDirFindItem,                   "_ZN10CDirectory8FindItemEPKcRjS2_");      // opcional: busca una entrada en el CDirectory (1 = esta)
+    SYM(TxdFindSlot,                     "_ZN9CTxdStore11FindTxdSlotEPKc");         // opcional: busca un .txd por nombre (-1 = no esta)
+    SYM(TxdAddSlot,                      "_ZN9CTxdStore10AddTxdSlotEPKcS1_b");      // opcional: registra un .txd propio (devuelve el hueco)
+    SYM(InfoSetCdPosnAndSize,            "_ZN14CStreamingInfo16SetCdPosnAndSizeEjj"); // opcional: pone offset/tamano de un .txd en su CStreamingInfo
     // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
     // dentro de GetEntry): solo se usa su direccion para localizar el objeto
-    // CDirectory escaneando su codigo (ver loader::FindCdDirectory).
+    // CDirectory y el array CStreamingInfo escaneando su codigo.
     void* loadCdDirFn = (void*)aml->GetSym(h, "_ZN10CStreaming15LoadCdDirectoryEPKci");
     LOGI("  %s _ZN10CStreaming15LoadCdDirectoryEPKci (solo para localizar el CDirectory; nunca se llama en partida)", loadCdDirFn ? "ok     " : "FALTA  ");
     loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
+    loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize);
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
