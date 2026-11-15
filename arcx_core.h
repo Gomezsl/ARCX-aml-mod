@@ -32,6 +32,8 @@ static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static int   (*AddImageToList)(const char*, bool);        // CStreaming::AddImageToList (opcional: registra el IMG propio; devuelve el slot)
 static void  (*LoadCdDirectory)(const char*, int);        // CStreaming::LoadCdDirectory (opcional: lee el directorio del IMG propio en el juego)
+static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
+static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
 static void  (*CGame_InitRestart_orig)();
 static void  (*CGame_ShutRestart_orig)();
@@ -75,6 +77,7 @@ static int g_nextTryFrame = 0;
 static int g_applyIdx = -2;         // skin que se esta pidiendo (-2 = ninguna en curso)
 static int g_applyFrame = 0;        // frame en el que se pidio
 static bool g_applyWaiting = false; // se pidio y se espera a que cargue
+static std::string g_pendingName;   // nombre de la skin que se esta pidiendo (el indice cambia al reescanear; el nombre no)
 static std::string g_coolName;      // skin que fallo hace poco (enfriamiento)
 static int g_coolFrame = -100000;
 // Lo ultimo que se le pidio al slot al juego: volver a pedir la MISMA skin
@@ -236,6 +239,8 @@ static void ConsumeScan() {
     if (!g_scanReady.exchange(false)) return;
     std::string desiredName = (g_desired >= 0 && g_desired < (int)g_skins.size()) ? g_skins[g_desired].name : "";
     std::string wornName = (g_curSkin >= 0 && g_curSkin < (int)g_skins.size()) ? g_skins[g_curSkin].name : "";
+    std::string pendName = (g_pending.load() >= 0 && g_pending.load() < (int)g_skins.size()) ? g_skins[g_pending.load()].name : "";
+    std::string applyName = g_pendingName;   // skin que se esta pidiendo (si hay una en curso)
     size_t rejected;
     {
         std::lock_guard<std::mutex> lk(g_scanMtx);
@@ -264,6 +269,26 @@ static void ConsumeScan() {
     };
     if (!desiredName.empty()) g_desired = find(desiredName);
     if (!wornName.empty()) g_curSkin = find(wornName);
+    // El indice de una peticion en curso queda viejo al cambiar la lista: se
+    // vuelve a buscar por nombre. Sin esto, en 3.1.6 el tiempo de espera de
+    // 'suk' se registro como 'Ghost' (el indice 0 paso a ser Ghost tras el
+    // reescaneo al encender ZyZ) y Ghost quedo en enfriamiento sin haber
+    // fallado. Si la skin ya no esta en la lista (su apartado se apago), se
+    // cancela el pedido y el enfriamiento queda con el nombre correcto.
+    if (!pendName.empty()) {
+        int ni = find(pendName);
+        if (ni >= 0) g_pending = ni; else g_pending = -2;
+    }
+    if (g_applyWaiting && g_applyIdx >= 0) {
+        int ni = find(applyName);
+        if (ni >= 0) { g_applyIdx = ni; }
+        else {
+            LOGI("la skin pendiente '%s' ya no esta en la lista: se cancela su pedido", applyName.c_str());
+            g_applyWaiting = false; g_applyIdx = -2; g_pendingName.clear();
+            g_coolName = applyName; g_coolFrame = g_frame;   // no se vuelve a pedir enseguida
+            g_slotReqName.clear(); g_slotReqFrame = -100000; // el juego ya no la esta cargando para este slot
+        }
+    }
     if (g_firstScan) {               // "recordar": al arrancar se vuelve a querer la ultima skin
         g_firstScan = false;
         if (g_remember && g_lastName != "CJ") {
@@ -434,7 +459,7 @@ static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
-        g_applyIdx = -2; g_applyWaiting = false;    // se abandona cualquier peticion en curso
+        g_applyIdx = -2; g_applyWaiting = false; g_pendingName.clear();   // se abandona cualquier peticion en curso
         void* veh0 = InVehicle() ? FindPlayerVehicle(-1, false) : nullptr;
         PrepareForModelChange(ped);
         if (DeleteRwObject) DeleteRwObject(ped);
@@ -463,13 +488,13 @@ static bool ApplySkin(int idx, bool force = false) {
     // eligio otra): solo se libera el slot para la nueva.
     if (g_applyWaiting && g_applyIdx != idx) {
         if (HasSpecialCharLoaded(g_slot)) {
-            g_applyWaiting = false; g_applyIdx = -2;
+            g_applyWaiting = false; g_applyIdx = -2; g_pendingName.clear();
             g_slotReqName.clear(); g_slotReqFrame = -100000;
         } else if (g_frame - g_applyFrame > 300) {
             // La anterior se agoto sin cargar: se libera el slot para la
             // nueva (sin enfriamiento: si se vuelve a pedir la anterior, el
             // control de 3.1.5 por nombre ya frena el reintento 10 s).
-            g_applyWaiting = false; g_applyIdx = -2;
+            g_applyWaiting = false; g_applyIdx = -2; g_pendingName.clear();
         } else {
             return false;   // todavia cargando la anterior: se espera sin pedir
         }
@@ -498,6 +523,7 @@ static bool ApplySkin(int idx, bool force = false) {
             g_applyIdx = idx;
             g_applyFrame = g_slotReqFrame;   // el tiempo de espera se cuenta desde el pedido original
             g_applyWaiting = true;
+            g_pendingName = name;
         } else {
             if (g_skins[idx].src == 1) {
                 // Skin PROPIA (ARCXLoader): se instala aqui el gancho de archivos
@@ -505,7 +531,7 @@ static bool ApplySkin(int idx, bool force = false) {
                 // el juego encuentre el archivo sin depender de ZyZ.
                 loader::InstallHook();
                 if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
-                    loader::RegisterImg(AddImageToList, LoadCdDirectory);
+                    loader::RegisterImg(AddImageToList, LoadCdDirectory, CFileMgrOpenFile, CFileMgrCloseFile);
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
@@ -514,19 +540,22 @@ static bool ApplySkin(int idx, bool force = false) {
             g_applyIdx = idx;
             g_applyFrame = g_frame;
             g_applyWaiting = true;
+            g_pendingName = name;
         }
     }
     // ---- fase 2: esperar a que cargue (sin volver a pedir ni llenar el log) ----
     if (HasSpecialCharLoaded(g_slot)) {
         g_applyWaiting = false;
         g_applyIdx = -2;
+        g_pendingName.clear();
         LOGI("  HasSpecialCharLoaded = 1");
     } else if (g_frame - g_applyFrame > 300) {   // ~5 s sin cargar: se cancela sin crash
         g_applyWaiting = false;
         g_applyIdx = -2;
+        g_pendingName.clear();
         g_coolName = name; g_coolFrame = g_frame;
         if (g_skins[idx].src == 1)
-            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd en el IMG propio (revisa que la skin este en ARCXLoader y que el log diga 'directorio del IMG cargado'; si falta, LoadCdDirectory no esta en libGTASA.so)", name.c_str());
+            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd en el IMG propio (revisa en el log que diga 'el juego abre el IMG como ...' y 'directorio del IMG cargado'; si falta, CFileMgr no abre el IMG con ninguna ruta)", name.c_str());
         else
             LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;   // hecho (cancelado): no se queda pendiente
@@ -556,7 +585,7 @@ static bool ApplySkin(int idx, bool force = false) {
             }
             if (g_pedVtbl && *(void**)mi != g_pedVtbl && !force) {
                 LOGI("  el modelo %u (slot %d) NO es un ped (vtable %p): no se aplica", modelId, g_slot, *(void**)mi);
-                if (g_slot != 1) { g_slot = 1; LOGI("  se usa el slot 1"); g_slotReqName.clear(); g_slotReqFrame = -100000; g_applyWaiting = false; g_applyIdx = -2; return ApplySkin(idx, force); }
+                if (g_slot != 1) { g_slot = 1; LOGI("  se usa el slot 1"); g_slotReqName.clear(); g_slotReqFrame = -100000; g_applyWaiting = false; g_applyIdx = -2; g_pendingName.clear(); return ApplySkin(idx, force); }
                 return true;
             }
         }
@@ -675,6 +704,7 @@ static bool ReadFlag(const volatile uint8_t* p) { return p && *p != 0; }
 static void OnNewSession() {
     g_curSkin = -1;
     g_slotReqName.clear(); g_slotReqFrame = -100000;   // partida nueva/cargada: el juego ya no tiene ningun pedido en el slot
+    loader::ResetRegistration();   // el juego reconstruye su CDirectory al cargar el nivel: el IMG propio hay que volver a registrarlo
     g_giveUp = false; g_autoTries = 0;
     if (!g_remember) {
         g_desired = -1; g_lastName = "CJ"; g_needReapply = false;
@@ -725,7 +755,7 @@ static void Watchdog() {
         if (!AddImageToList) {
             static bool said = false;
             if (!said) { said = true; LOGI("AddImageToList no esta en libGTASA.so: las skins propias no se registraran (las de ZyZ si funcionan)"); }
-        } else loader::RegisterImg(AddImageToList, LoadCdDirectory);
+        } else loader::RegisterImg(AddImageToList, LoadCdDirectory, CFileMgrOpenFile, CFileMgrCloseFile);
     }
 
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
@@ -837,6 +867,8 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
     SYM(AddImageToList,                  "_ZN10CStreaming14AddImageToListEPKcb");   // opcional: registra el IMG propio de ARCXLoader (devuelve el slot)
     SYM(LoadCdDirectory,                 "_ZN10CStreaming15LoadCdDirectoryEPKci");  // opcional: lee el directorio del IMG propio en el juego
+    SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
+    SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
     LOGI("  %s CPedIntelligence::ClearTaskDuckSecondary", ClearTaskDuckSecondary ? "ok" : "FALTA");
     g_pauseUser = (const volatile uint8_t*)aml->GetSym(h, "_ZN6CTimer11m_UserPauseE");

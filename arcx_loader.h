@@ -23,6 +23,23 @@
 // cargaba y ademas atascaba el canal de carga y las skins de ZyZ que se
 // pedian despues tampoco cargaban. El gancho de fopen/open/openat queda solo
 // como diagnostico (por si el juego pidiera algun archivo suelto).
+//
+// LA RUTA DEL IMG (3.1.7, verificado desensamblando CFileMgr::OpenFile
+// 0x4d2b74 y CStreaming::LoadCdDirectory 0x5578fc): LoadCdDirectory abre el
+// IMG con CFileMgr::OpenFile(ruta, "rb"), y OpenFile ANTEPONE la carpeta base
+// del juego a toda ruta que no tenga ':' (es decir, tambien a las rutas
+// absolutas de Android). Por eso en 3.1.6 la ruta absoluta
+// ".../files/ARCXLoader/arcxml/gta3.img" se convertia en
+// "<base>/storage/emulated/0/..." (invalida): OpenFile fallaba,
+// LoadCdDirectory salia sin leer nada y el juego nunca encontraba 'suk.dff'
+// (y el pedido roto volvia a atascar las skins de ZyZ). ZyZ y el juego usan
+// rutas RELATIVAS a la carpeta base ("ZYZML\GTA3.IMG", "TEXDB\GTA3.IMG").
+// Por eso RegisterImg ya no usa la ruta absoluta: prueba las candidatas con
+// el propio OpenFile del juego y usa la primera que abre (relativa con
+// barras invertidas como ZyZ, relativa con barras normales, y la absoluta
+// como ultimo recurso). Ademas BuildImg escribe una copia del IMG en la
+// carpeta "normal" (Android/data/... en vez de Android_unprotected/data/...),
+// por si la carpeta base del juego es esa y no la _unprotected.
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -265,6 +282,31 @@ static bool BuildImg(const std::vector<skinscan::Skin>& skins, const std::string
         remove(imgPath.c_str());
         return false;
     }
+    // Copia en la carpeta "normal" (Android/data/... en vez de
+    // Android_unprotected/data/...): si la carpeta base del juego es esa y no
+    // la _unprotected, la ruta relativa del IMG solo abre ahi. No es fatal si
+    // falla (la ruta relativa se prueba con OpenFile antes de registrar).
+    {
+        const std::string from = "Android_unprotected", to = "Android";
+        size_t at = imgPath.find(from);
+        if (at != std::string::npos) {
+            std::string alt = imgPath;
+            alt.replace(at, from.size(), to);
+            std::string adir = alt.substr(0, alt.find_last_of('/'));
+            mkdir(adir.c_str(), 0777);
+            FILE* in = fopen(imgPath.c_str(), "rb");
+            FILE* out = in ? fopen(alt.c_str(), "wb") : nullptr;
+            if (in && out) {
+                char buf[8192]; size_t n;
+                while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+                Log("copia del IMG tambien en %s", alt.c_str());
+            } else {
+                Log("no se pudo copiar el IMG a %s (no es fatal: se usa la ruta _unprotected)", alt.c_str());
+            }
+            if (in) fclose(in);
+            if (out) fclose(out);
+        }
+    }
     g_lastSig = sig;
     g_imgPath = imgPath;
     g_imgBuilt = true;
@@ -284,23 +326,62 @@ static bool BuildImg(const std::vector<skinscan::Skin>& skins, const std::string
 // (y atascaba tambien las skins de ZyZ que se pedian despues).
 // Solo una vez por sesion; si alguna funcion no existe en libGTASA.so, las
 // skins propias quedan como antes (se listan, no se aplican, sin crash).
-static bool RegisterImg(int (*addImageToList)(const char*, bool), void (*loadCdDirectory)(const char*, int)) {
+// Resuelve con que ruta abre el juego el IMG propio: se prueba cada
+// candidata con el propio CFileMgr::OpenFile del juego y se usa la primera
+// que abre. La relativa con barras invertidas es la que usan ZyZ y el juego;
+// la absoluta es el ultimo recurso (en 3.1.6 se probo que falla: OpenFile le
+// antepone la carpeta base y la ruta queda invalida). Devuelve "" si ninguna
+// abre: en ese caso no se registra nada (registrar un IMG que el juego no
+// puede abrir solo atasca el canal de carga).
+static std::string ResolveImgPath(uint64_t (*openFile)(const char*, const char*), void (*closeFile)(uint64_t)) {
+    const char* cands[] = {
+        "ARCXLoader\\arcxml\\gta3.img",   // relativa, como ZyZ ("ZYZML\GTA3.IMG") y el juego ("TEXDB\GTA3.IMG")
+        "ARCXLoader/arcxml/gta3.img",     // relativa, con barras normales
+        nullptr,                          // absoluta (g_imgPath)
+    };
+    if (!openFile) {
+        Log("CFileMgr::OpenFile no esta en libGTASA.so: no se puede probar la ruta del IMG, se usa la absoluta como antes");
+        return g_imgPath;
+    }
+    for (auto* c : cands) {
+        std::string p = c ? c : g_imgPath;
+        uint64_t h = openFile(p.c_str(), "rb");
+        if (h) {
+            if (closeFile) closeFile(h);
+            Log("el juego abre el IMG como '%s'", p.c_str());
+            return p;
+        }
+        Log("  el juego NO abre el IMG como '%s'", p.c_str());
+    }
+    Log("CFileMgr no abre el IMG con ninguna ruta: el juego no podra leer su directorio (las skins propias no cargaran)");
+    return "";
+}
+
+// Al cargar una partida nueva el juego reconstruye su CDirectory (Init2):
+// las entradas del IMG propio desaparecen y hay que volver a registrarlo.
+// Se llama desde OnNewSession; el watchdog lo vuelve a registrar en cuanto
+// el jugador esta en partida.
+static void ResetRegistration() { g_imgRegistered = false; }
+
+static bool RegisterImg(int (*addImageToList)(const char*, bool), void (*loadCdDirectory)(const char*, int), uint64_t (*openFile)(const char*, const char*), void (*closeFile)(uint64_t)) {
     if (g_imgRegistered.load()) return true;
     if (!g_imgBuilt.load() || !addImageToList) return false;
-    int idx = addImageToList(g_imgPath.c_str(), true);
-    if (idx <= 0) {   // 0 = sin hueco libre en la lista de imagenes (8 max; el slot 0 es gta3.img, nunca libre)
+    std::string path = ResolveImgPath(openFile, closeFile);
+    if (path.empty()) return false;   // ninguna ruta abre el IMG: no se registra (registrarlo atasca el canal)
+    int idx = addImageToList(path.c_str(), true);
+    if (idx <= 0) {   // 0 = sin hueco libre en la lista de imagenes (la lista tiene 36 huecos por un mod; el slot 0 es gta3.img, nunca libre)
         static bool said = false;
         if (!said) { said = true; Log("no hay hueco libre en la lista de imagenes del juego: el IMG propio no se registro"); }
         return false;
     }
     if (loadCdDirectory) {
-        loadCdDirectory(g_imgPath.c_str(), idx);
-        Log("directorio del IMG cargado en el juego (slot %d): el juego ya puede encontrar las skins propias", idx);
+        loadCdDirectory(path.c_str(), idx);
+        Log("directorio del IMG cargado en el juego (slot %d, ruta '%s'): el juego ya puede encontrar las skins propias", idx, path.c_str());
     } else {
         Log("LoadCdDirectory no esta en libGTASA.so: el IMG se registro pero el juego no leera su directorio (las skins propias no cargaran)");
     }
     g_imgRegistered = true;
-    Log("IMG registrado en el juego: %s (las skins propias ya se pueden pedir)", g_imgPath.c_str());
+    Log("IMG registrado en el juego: %s (las skins propias ya se pueden pedir)", path.c_str());
     return true;
 }
 static bool ImgReady() { return g_imgBuilt.load(); }
