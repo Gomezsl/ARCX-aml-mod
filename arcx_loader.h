@@ -104,6 +104,19 @@
 // pedir un modelo), +6 byte (0), +7 byte indice de imagen, +8 offset en
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
+//
+// 3.1.12: registrar el .txd NO basta para que se cargue: hay que PEDIRLO al
+// sistema de streaming. RequestSpecialModel pide el .dff (RequestModel(299))
+// pero NUNCA pide el .txd (desensamblado 0x399154-0x399490: solo llama a
+// FindTxdSlot + SetTexDictionary, y CTxdStore::LoadTxd es un stub que
+// devuelve 1 sin hacer nada). Por eso en 3.1.11 el .txd quedaba registrado
+// (hueco 3025, modelo 23025) pero la skin seguia en blanco: nadie pedia el
+// modelo 23025. Ahora RegisterTxd, tras rellenar el CStreamingInfo, llama a
+// CStreaming::RequestModel(modeloTxd, 0) (el modelo del .txd es hueco +
+// 0x4E20; RequestModel lo trata como txd si cae en [20000, 24992], ver
+// 0x394b94-0x394bac), asi que el sistema de streaming lo lee del IMG y lo
+// carga. Se pide al registrar (precarga: cuando se toca la skin ya esta
+// cargado o cargando).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -497,6 +510,7 @@ static uintptr_t g_streamInfoGlobal = 0;   // direccion del global con la base d
 static int (*g_txdFindSlot)(const char*) = nullptr;                        // CTxdStore::FindTxdSlot(nombre) -> hueco o -1
 static int (*g_txdAddSlot)(const char*, const char*, bool) = nullptr;     // CTxdStore::AddTxdSlot(nombre, rutaIMG, false) -> hueco
 static void (*g_infoSetCdPosnAndSize)(void*, uint32_t, uint32_t) = nullptr; // CStreamingInfo::SetCdPosnAndSize(this, offset, tamano)
+static void (*g_requestModel)(int, int) = nullptr;                          // CStreaming::RequestModel(modelo, flags) (opcional: pide un modelo/txd al streaming)
 
 static uintptr_t FindStreamingInfoGlobal(void* loadCdDirectoryFn) {
     if (!loadCdDirectoryFn) return 0;
@@ -532,10 +546,11 @@ static void* GetStreamingInfoArray() {
     return arr;   // la base del array CStreamingInfo (elementos de 20 bytes)
 }
 
-static void InitTxd(void* loadCdDirectoryFn, int (*findSlot)(const char*), int (*addSlot)(const char*, const char*, bool), void (*setPosnAndSize)(void*, uint32_t, uint32_t)) {
+static void InitTxd(void* loadCdDirectoryFn, int (*findSlot)(const char*), int (*addSlot)(const char*, const char*, bool), void (*setPosnAndSize)(void*, uint32_t, uint32_t), void (*requestModel)(int, int)) {
     g_txdFindSlot = findSlot;
     g_txdAddSlot = addSlot;
     g_infoSetCdPosnAndSize = setPosnAndSize;
+    g_requestModel = requestModel;
     g_streamInfoGlobal = FindStreamingInfoGlobal(loadCdDirectoryFn);
     if (g_streamInfoGlobal) {
         void* arr = GetStreamingInfoArray();
@@ -579,6 +594,15 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
     info[6] = 0;                      // campo +6 a 0, como hace el juego
     g_infoSetCdPosnAndSize(info, rawOffset, size);   // +8 offset, +12 tamano
     Log("txd '%s' registrado (hueco %d, modelo %d, slot %d, offset %u, tamano %u sectores)", name, txdSlot, modelId, slot, rawOffset, size);
+    // Pedir el .txd al streaming (3.1.12): registrarlo no lo carga. El juego
+    // pide el .dff al aplicar la skin pero nunca pide el .txd, asi que hay
+    // que pedirlo aqui (precarga). Sin esto la skin se ve en blanco.
+    if (g_requestModel) {
+        g_requestModel(modelId, 0);
+        Log("txd '%s' pedido al streaming (modelo %d): sus texturas ya se estan cargando", name, modelId);
+    } else {
+        Log("sin RequestModel: el .txd '%s' quedo registrado pero no se pidio (puede verse sin texturas)", name);
+    }
     return true;
 }
 
