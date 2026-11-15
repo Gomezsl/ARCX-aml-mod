@@ -846,15 +846,23 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
     return tex;
 }
 
-// RwImage de RenderWare (layout estandar 3.x, el que llena RtPNGImageRead y
-// el que leen RwImageFindRasterFormat/RwRasterSetFromImage): width+0,
-// height+4, depth+8, stride+12, cpPixels+16, palette+24 (32 bytes en 64
-// bits). Se construye a mano para las imagenes decodificadas con stb_image
-// (3.1.25): el juego no trae lector JPEG, asi que las JPG se decodifican
-// aqui a RGBA y se meten por el mismo camino (FindRasterFormat ->
-// RasterCreate -> SetFromImage -> TextureCreate) que las PNG.
+// RwImage de RenderWare (layout REAL en GTA SA 2.10 arm64, verificado
+// desensamblando RwImageCreate 0x2709d8, RwImageAllocatePixels 0x270b1c y
+// _rwOpenGLImageFindRasterFormat 0x23e7a0 en libGTASA.so): flags+0,
+// width+4, height+8, depth+12, stride+16, pad+20, cpPixels+24, palette+32
+// (40 bytes). flags bit 0 = "pixeles reservados por el juego" (lo pone
+// AllocatePixels; con 0 el juego no intenta liberarlos). OJO: NO es el
+// layout estandar de 32 bytes (width+0, cpPixels+16, palette+24): ese
+// layout estaba mal y provoco el crash de 3.1.26 al entrar a una partida,
+// porque el juego leia cpPixels en +24 y encontraba nullptr (nuestra
+// palette), y _rwOpenGLImageFindRasterFormat hacia ldrb [NULL+3] ->
+// fault 0x3. Se construye a mano para las imagenes decodificadas con
+// stb_image (3.1.25): el juego no trae lector JPEG, asi que las JPG se
+// decodifican aqui a RGBA y se meten por el mismo camino
+// (FindRasterFormat -> RasterCreate -> SetFromImage -> TextureCreate)
+// que las PNG.
 struct RwImageManual {
-    int32_t width, height, depth, stride;
+    int32_t flags, width, height, depth, stride, pad;
     uint8_t* cpPixels;
     void* palette;
 };
@@ -869,7 +877,7 @@ static void* CreateTextureFromRgba(int w, int h, const uint8_t* px, const std::s
     if (!g_rwImageFindRasterFormat || !g_rwRasterCreate || !g_rwRasterSetFromImage || !g_rwTextureCreate || !g_rwTextureSetName) return nullptr;
     if (w < 1 || h < 1 || w > 4096 || h > 4096 || !px) return nullptr;
     RwImageManual img;
-    img.width = w; img.height = h; img.depth = 32; img.stride = w * 4; img.cpPixels = const_cast<uint8_t*>(px); img.palette = nullptr;
+    img.flags = 0; img.width = w; img.height = h; img.depth = 32; img.stride = w * 4; img.pad = 0; img.cpPixels = const_cast<uint8_t*>(px); img.palette = nullptr;
     int a = 0, b = 0, c = 0, d = 0;
     void* fmt = g_rwImageFindRasterFormat(&img, 4, &a, &b, &c, &d);
     if (!fmt) { Log("    %s '%s': RwImageFindRasterFormat no encontro formato", kind, texName.c_str()); return nullptr; }
