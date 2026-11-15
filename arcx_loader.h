@@ -105,17 +105,18 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.18 (VUELTA A 3.1.15, ESTABLE): en 3.1.16/3.1.17 el juego se seguia
-// congelando al usar la skin aunque QueueModel ya revisaba si el modelo
-// estaba en la cola. El problema es meter el .txd en la cola al aplicar:
-// el juego puede estar cargandolo en ese momento y tocar la cola ahi
-// corrompe el recorrido. Por eso en 3.1.18 el .txd SOLO se mete en la cola
-// una vez, al registrar el IMG (RegisterTxd, como en 3.1.15, que no se
-// cerraba ni se congelaba); al aplicar solo se pide con RequestModel (sin
-// tocar la cola) y se quita la espera del .txd de ApplySkin. La skin se
-// pone (en blanco si el .txd no cargo) y el juego no se congela. Ademas
-// LogTxdStatus ahora vuelca los 20 bytes del CStreamingInfo del .txd, para
-// ver por que no termina de cargar y atacar las texturas por otro camino.
+// 3.1.19 (CARGA DIRECTA DEL .TXD, SIN LA COLA): la imagen que mando Daniel
+// describe el flujo correcto: abrir el .txd con RwStreamOpen y cargarlo con
+// CTxdStore::LoadTxd + AddRef. Pero en este libGTASA.so los LoadTxd del
+// juego son stubs (devuelven 1 sin hacer nada: 0x6f9090, 0x6f9098, 0x6f90a0),
+// asi que se hace a mano: RwStreamOpen (memoria) + RwTexDictionaryStreamRead
+// (funcion real, 0x26cb98, 476 bytes) para crear el diccionario, se guarda
+// su puntero en la entrada del CTxdStore (+0, que AddTxdSlot deja en 0) y se
+// llama a CTxdStore::AddRef para que no se descargue. El .txd se lee del
+// propio IMG (sus datos ya estan ahi) y se carga en cuanto se registra, sin
+// pasar por la cola de streaming del juego (que dejaba el .txd en estado 1
+// para siempre). Por eso RegisterTxd ya no pide el .txd al streaming ni lo
+// mete en la cola.
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -513,6 +514,22 @@ static void (*g_requestModel)(int, int) = nullptr;                          // C
 static uintptr_t g_queueHeadGlobal = 0;   // direccion del global con la cabeza de la cola de peticiones (0 = no localizado)
 static uintptr_t g_reqCountGlobal = 0;    // direccion del global con el contador de modelos pedidos (0 = no localizado)
 
+// Carga DIRECTA del .txd con RenderWare (3.1.19): en vez de pedir el .txd
+// al streaming del juego (que lo dejaba en estado 1 para siempre), se lee
+// el archivo .txd y se crea su diccionario de texturas con
+// RwTexDictionaryStreamRead. Los LoadTxd del juego son stubs (devuelven 1
+// sin hacer nada), asi que el diccionario se guarda a mano en la entrada
+// del CTxdStore (+0, que AddTxdSlot deja en 0) y se llama a AddRef para que
+// no se descargue. Tipos de RenderWare (valores estandar del SDK):
+// rwSTREAMMEMORY = 3 (flujo desde memoria), rwSTREAMREAD = 1 (solo lectura).
+struct RwMemory { void* start; uint32_t length; };   // lo que RwStreamOpen(rwSTREAMMEMORY) espera como tercer argumento
+static void* (*g_rwStreamOpen)(int, int, const void*) = nullptr;        // RwStreamOpen(tipo, acceso, datos) -> RwStream* o null
+static void* (*g_rwTexDictionaryStreamRead)(void*) = nullptr;            // RwTexDictionaryStreamRead(stream) -> RwTexDictionary* o null
+static void (*g_rwStreamClose)(void*, void*) = nullptr;                  // RwStreamClose(stream, datos) (el segundo argumento es null)
+static void (*g_txdAddRef)(int) = nullptr;                               // CTxdStore::AddRef(hueco) (sube el contador de referencias)
+static uintptr_t g_txdStoreGlobal = 0;   // direccion del global con la tabla del CTxdStore (0 = no localizado)
+static std::vector<void*> g_txdBuffers;  // buffers de .txd leidos: se guardan para no liberarlos (el diccionario puede referenciarlos)
+
 static uintptr_t FindStreamingInfoGlobal(void* loadCdDirectoryFn) {
     if (!loadCdDirectoryFn) return 0;
     const uint32_t* code = (const uint32_t*)loadCdDirectoryFn;
@@ -558,6 +575,102 @@ static void InitTxd(void* loadCdDirectoryFn, int (*findSlot)(const char*), int (
         if (arr) Log("array CStreamingInfo localizado en %p (global %p)", arr, (void*)g_streamInfoGlobal);
         else Log("array CStreamingInfo aun no listo (global %p): se reintentara al registrar el IMG", (void*)g_streamInfoGlobal);
     }
+}
+
+// Localiza el global con la tabla del CTxdStore (3.1.19) escaneando el codigo
+// de CTxdStore::AddRef: busca un adrp seguido (hasta 4 instrucciones despues)
+// por un ldr de 64 bits con desplazamiento 0x4e8 y el mismo registro destino.
+// En el juego ese global es 0x8514e8 (la tabla se alcanza con triple
+// desreferencia: *(*(*(0x8514e8))) = base de las entradas de 64 bytes).
+static uintptr_t FindTxdStoreGlobal(void* addRefFn) {
+    if (!addRefFn) return 0;
+    const uint32_t* code = (const uint32_t*)addRefFn;
+    const uintptr_t base = (uintptr_t)addRefFn;
+    for (int i = 0; i < 0x10; i++) {   // AddRef mide 40 bytes (10 palabras)
+        uint32_t w = code[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;   // adrp
+        int32_t imm = (int32_t)(((w >> 5) & 0x7FFFF) << 2) | (int32_t)((w >> 29) & 0x3);
+        if (imm & 0x100000) imm -= 0x200000;
+        uintptr_t page = (base + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF;
+        uintptr_t target = page + ((uintptr_t)imm << 12);
+        int rd = (int)(w & 0x1F);
+        for (int j = 1; j <= 4; j++) {
+            uint32_t w2 = code[i + j];
+            if ((w2 & 0xFFC00000u) != 0xF9400000u) continue;   // ldr (offset sin signo, 64 bits)
+            uint32_t imm12 = (w2 >> 10) & 0xFFF;
+            int rn = (int)((w2 >> 5) & 0x1F);
+            if (imm12 * 8 == 0x4e8 && rn == rd) return target + 0x4e8;   // global 0x8514e8
+        }
+    }
+    Log("no se pudo localizar la tabla del CTxdStore en el codigo de AddRef: los .txd propios no se cargaran directos");
+    return 0;
+}
+
+// Devuelve la base de las entradas del CTxdStore (64 bytes por hueco) o null.
+// La tabla se alcanza con triple desreferencia desde el global 0x8514e8.
+static void* GetTxdEntriesBase() {
+    if (!g_txdStoreGlobal) return nullptr;
+    void* p1 = *(void**)g_txdStoreGlobal;
+    if (!p1) return nullptr;
+    void* p2 = *(void**)p1;
+    if (!p2) return nullptr;
+    void* entries = *(void**)p2;
+    return entries;
+}
+
+// Guarda las funciones de RenderWare para la carga directa del .txd (3.1.19)
+// y localiza el global con la tabla del CTxdStore.
+static void InitDirectTxd(void* rwStreamOpen, void* rwTexDictionaryStreamRead, void* rwStreamClose, void* txdAddRef) {
+    g_rwStreamOpen = (void* (*)(int, int, const void*))rwStreamOpen;
+    g_rwTexDictionaryStreamRead = (void* (*)(void*))rwTexDictionaryStreamRead;
+    g_rwStreamClose = (void (*)(void*, void*))rwStreamClose;
+    g_txdAddRef = (void (*)(int))txdAddRef;
+    g_txdStoreGlobal = FindTxdStoreGlobal(txdAddRef);
+    if (g_txdStoreGlobal) Log("tabla del CTxdStore localizada (global %p)", (void*)g_txdStoreGlobal);
+}
+
+// Dice si el .txd de una skin ya tiene su diccionario de texturas cargado
+// (3.1.19): la entrada del CTxdStore tiene el puntero al diccionario en +0
+// (AddTxdSlot lo deja en 0; LoadTxdDirect lo pone). Si no se puede comprobar,
+// devuelve false.
+static bool TxdDictLoaded(const char* name) {
+    if (!g_txdFindSlot) return false;
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) return false;
+    void* entries = GetTxdEntriesBase();
+    if (!entries) return false;
+    void* entry = (char*)entries + (uintptr_t)txdSlot * 0x40;
+    return *(void**)entry != nullptr;
+}
+
+// Carga el .txd de una skin DIRECTO desde sus datos en memoria (3.1.19):
+// crea un flujo de RenderWare desde la memoria, lee el diccionario de
+// texturas con RwTexDictionaryStreamRead, lo guarda en la entrada del
+// CTxdStore (+0) y llama a AddRef para que el juego no lo descargue. Los
+// datos (data) se guardan y NO se liberan: el diccionario puede
+// referenciarlos. Devuelve true si el diccionario quedo cargado.
+static bool LoadTxdDirect(const char* name, void* data, size_t dataSize) {
+    if (!g_txdFindSlot || !g_rwStreamOpen || !g_rwTexDictionaryStreamRead || !g_rwStreamClose || !g_txdAddRef) {
+        Log("  sin funciones de RenderWare: el .txd '%s' no se puede cargar directo", name);
+        return false;
+    }
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) { Log("  txd de '%s': no esta registrado (FindTxdSlot = -1)", name); return false; }
+    void* entries = GetTxdEntriesBase();
+    if (!entries) { Log("  sin tabla del CTxdStore: el .txd '%s' no se puede cargar directo", name); return false; }
+    void* entry = (char*)entries + (uintptr_t)txdSlot * 0x40;
+    if (*(void**)entry) { Log("  txd de '%s': su diccionario ya estaba cargado (hueco %d)", name, txdSlot); return true; }
+    RwMemory mem = { data, (uint32_t)dataSize };
+    void* stream = g_rwStreamOpen(3, 1, &mem);   // rwSTREAMMEMORY, rwSTREAMREAD
+    if (!stream) { Log("  RwStreamOpen no pudo abrir el .txd '%s' desde memoria", name); return false; }
+    void* dict = g_rwTexDictionaryStreamRead(stream);
+    g_rwStreamClose(stream, nullptr);
+    if (!dict) { Log("  RwTexDictionaryStreamRead no pudo leer el .txd '%s' (puede estar en formato DXT de PC, no compatible con Android)", name); return false; }
+    *(void**)entry = dict;   // la entrada del CTxdStore apunta al diccionario
+    g_txdAddRef(txdSlot);    // que el juego no lo descargue en medio de la partida
+    g_txdBuffers.push_back(data);   // el buffer se queda: el diccionario puede referenciarlo
+    Log("  txd de '%s' CARGADO directo (hueco %d, diccionario %p): sus texturas ya estan en el juego", name, txdSlot, dict);
+    return true;
 }
 
 // Localiza un global del juego escaneando el codigo de CStreaming::RequestModel
@@ -690,20 +803,13 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
     g_infoSetCdPosnAndSize(info, rawOffset, size);   // +8 offset, +12 tamano
     *(int16_t*)(info + 4) = -1;      // +4 = fin de la cadena "siguiente en el CD" (3.1.14: si quedara en 0, el streaming seguiria hasta el modelo 0)
     Log("txd '%s' registrado (hueco %d, modelo %d, slot %d, offset %u, tamano %u sectores)", name, txdSlot, modelId, slot, rawOffset, size);
-    // Pedir el .txd al streaming (3.1.12): registrarlo no lo carga. El juego
-    // pide el .dff al aplicar la skin pero nunca pide el .txd, asi que hay
-    // que pedirlo aqui (precarga). Sin esto la skin se ve en blanco.
-    if (g_requestModel) {
-        g_requestModel(modelId, 0);
-        Log("txd '%s' pedido al streaming (modelo %d): sus texturas ya se estan cargando", name, modelId);
-    } else {
-        Log("sin RequestModel: el .txd '%s' quedo registrado pero no se pidio (puede verse sin texturas)", name);
-    }
-    // Meter el .txd en la cola de peticiones (3.1.14): RequestModel solo le
-    // pone estado 1 a los .txd, no los mete en la cola, y el streaming solo
-    // recoge modelos de esa cola. Sin esto el estado se queda en 1 siempre.
-    if (QueueModel(modelId)) Log("txd '%s' metido en la cola de carga (modelo %d, estado 2)", name, modelId);
-    else Log("txd '%s': no se pudo meter en la cola de carga (puede quedarse en estado 1 y no cargar)", name);
+    // 3.1.19: el .txd ya NO se pide al streaming ni se mete en la cola. El
+    // streaming dejaba el .txd en estado 1 para siempre (nunca terminaba de
+    // cargar) y tocar la cola congelaba el juego. Ahora el .txd se carga
+    // DIRECTO con RenderWare (LoadTxdDirect, desde los datos del IMG) en
+    // cuanto se registra; eso lo hace LoadImgDirectory despues de llamar
+    // aqui. El CStreamingInfo de arriba solo queda como registro de donde
+    // esta el .txd dentro del IMG.
     return true;
 }
 
@@ -741,8 +847,9 @@ static void LogTxdStatus(const char* name) {
     void* arr = GetStreamingInfoArray();
     if (!arr) { Log("  txd de '%s': sin array CStreamingInfo", name); return; }
     const uint8_t* info = (const uint8_t*)arr + (uintptr_t)modelId * 0x14;
-    Log("  txd de '%s': hueco %d, modelo %d, estado = %d (0=no pedido, 1=pidiendo, 2=cargado), imagen %d, offset %u, tamano %u",
-        name, txdSlot, modelId, info[0x10], info[7], *(const uint32_t*)(info + 8), *(const uint32_t*)(info + 12));
+    Log("  txd de '%s': hueco %d, modelo %d, estado = %d (0=no pedido, 1=pidiendo, 2=cargado), imagen %d, offset %u, tamano %u, diccionario %s",
+        name, txdSlot, modelId, info[0x10], info[7], *(const uint32_t*)(info + 8), *(const uint32_t*)(info + 12),
+        TxdDictLoaded(name) ? "CARGADO" : "sin cargar");
     // Volcado completo de los 20 bytes del CStreamingInfo (3.1.18): para ver
     // por que el .txd no termina de cargar (+0/+2 = enlaces de la cola,
     // +4 = siguiente en el CD, +6 = banderas, +7 = imagen, +8 = offset,
@@ -809,7 +916,29 @@ static bool LoadImgDirectory(int slot, void* cdDir) {
             uint32_t rawOff = *(uint32_t*)ent;   // offset SIN el slot (el slot va aparte, en el byte +7 del CStreamingInfo)
             uint16_t sizeHi = *(uint16_t*)(ent + 6);
             uint32_t size = sizeHi != 0 ? sizeHi : *(uint16_t*)(ent + 4);   // regla del juego: si la mitad alta es distinta de 0, esa es el tamano
-            if (RegisterTxd(name, g_resolvedPath.c_str(), rawOff, size, slot)) txdOk++;
+            if (RegisterTxd(name, g_resolvedPath.c_str(), rawOff, size, slot)) {
+                txdOk++;
+                // Cargar el .txd DIRECTO (3.1.19): leer sus datos del IMG y
+                // crear su diccionario de texturas con RenderWare, sin pasar
+                // por la cola de streaming del juego. Se guarda la posicion
+                // actual del archivo y se vuelve a ella para seguir leyendo
+                // el directorio (el bucle usa las entradas en memoria, pero
+                // el fread del directorio sigue despues).
+                long dirPos = ftell(f);
+                if (fseek(f, (long)rawOff * 2048, SEEK_SET) == 0) {
+                    size_t bytes = (size_t)size * 2048;
+                    uint8_t* buf = (uint8_t*)malloc(bytes);
+                    if (buf && fread(buf, 1, bytes, f) == bytes) {
+                        LoadTxdDirect(name, buf, bytes);   // guarda el buffer (no se libera)
+                    } else {
+                        Log("  no se pudo leer el .txd '%s' del IMG (offset %u, %u sectores)", name, rawOff, size);
+                        if (buf) free(buf);
+                    }
+                } else {
+                    Log("  no se pudo buscar el .txd '%s' en el IMG (offset %u)", name, rawOff);
+                }
+                fseek(f, dirPos, SEEK_SET);
+            }
             else txdFail++;
         }
     }

@@ -37,6 +37,10 @@ static int  (*TxdFindSlot)(const char*);                        // CTxdStore::Fi
 static int  (*TxdAddSlot)(const char*, const char*, bool);     // CTxdStore::AddTxdSlot (opcional: registra un .txd propio; devuelve el hueco)
 static void (*InfoSetCdPosnAndSize)(void*, uint32_t, uint32_t); // CStreamingInfo::SetCdPosnAndSize (opcional: pone offset/tamano de un .txd)
 static void (*RequestModel)(int, int);                   // CStreaming::RequestModel (opcional: pide un modelo/txd al streaming)
+static void* (*RwStreamOpen)(int, int, const void*);       // RwStreamOpen (opcional: abre un flujo de RenderWare; 3.1.19 carga directa del .txd)
+static void* (*RwTexDictionaryStreamRead)(void*);          // RwTexDictionaryStreamRead (opcional: lee un diccionario de texturas de un flujo)
+static void  (*RwStreamClose)(void*, void*);               // RwStreamClose (opcional: cierra un flujo de RenderWare)
+static void  (*TxdAddRef)(int);                            // CTxdStore::AddRef (opcional: sube el contador de referencias de un .txd)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
@@ -540,7 +544,9 @@ static bool ApplySkin(int idx, bool force = false) {
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
-            if (g_skins[idx].src == 1) loader::RequestTxd(name.c_str());   // el .txd se pide junto con el .dff (3.1.13)
+            // 3.1.19: el .txd ya NO se pide al streaming aqui. Se carga DIRECTO
+            // con RenderWare al registrar el IMG (LoadTxdDirect), asi que al
+            // aplicar la skin su diccionario ya esta en el CTxdStore.
             LoadAllRequestedModels(false);
             g_slotReqName = name; g_slotReqFrame = g_frame;
             g_applyIdx = idx;
@@ -879,6 +885,10 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(TxdAddSlot,                      "_ZN9CTxdStore10AddTxdSlotEPKcS1_b");      // opcional: registra un .txd propio (devuelve el hueco)
     SYM(InfoSetCdPosnAndSize,            "_ZN14CStreamingInfo16SetCdPosnAndSizeEjj"); // opcional: pone offset/tamano de un .txd en su CStreamingInfo
     SYM(RequestModel,                     "_ZN10CStreaming12RequestModelEii");   // opcional: pide un modelo/txd al streaming (lo carga)
+    SYM(RwStreamOpen,                      "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv"); // opcional: abre un flujo de RenderWare (3.1.19)
+    SYM(RwTexDictionaryStreamRead,         "_Z25RwTexDictionaryStreamReadP8RwStream"); // opcional: lee un diccionario de texturas de un flujo (3.1.19)
+    SYM(RwStreamClose,                     "_Z13RwStreamCloseP8RwStreamPv");         // opcional: cierra un flujo de RenderWare (3.1.19)
+    SYM(TxdAddRef,                         "_ZN9CTxdStore6AddRefEi");                // opcional: sube el contador de referencias de un .txd (3.1.19)
     // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
     // dentro de GetEntry): solo se usa su direccion para localizar el objeto
     // CDirectory y el array CStreamingInfo escaneando su codigo.
@@ -887,6 +897,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
     loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize, RequestModel);
     loader::InitQueue((void*)RequestModel);   // localiza la cabeza de la cola de peticiones (3.1.14: para meter los .txd en la cola)
+    loader::InitDirectTxd((void*)RwStreamOpen, (void*)RwTexDictionaryStreamRead, (void*)RwStreamClose, (void*)TxdAddRef);   // carga directa del .txd con RenderWare (3.1.19)
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
