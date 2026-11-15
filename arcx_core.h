@@ -786,8 +786,10 @@ static void Watchdog() {
     // RenderWare y se registran en el CTxdStore (sin .txd). La funcion salta
     // las skins que ya cargaron y re-registra el diccionario si al cargar una
     // partida nueva la entrada se reseteo, asi que llamarla a cada frame es
-    // barato (solo recorre la lista y hace una busqueda por skin).
-    if (loader::ImgRegistered()) loader::LoadPngForSkins(g_skins);
+    // barato (solo recorre la lista y hace una busqueda por skin). Si una skin
+    // falla, no se reintenta hasta pasados ~10 s (3.1.21: en 3.1.20 el
+    // reintento a cada frame lleno el log con 7371 lineas de error).
+    if (loader::ImgRegistered()) loader::LoadPngForSkins(g_skins, g_frame);
 
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
     if ((g_pauseUser && *g_pauseUser) || (g_pauseCode && *g_pauseCode)) return;

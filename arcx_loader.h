@@ -723,6 +723,27 @@ static void InitPng(void* rtPngImageRead, void* rwImageFindRasterFormat, void* r
         Log("sin RtPNGImageRead o RwTexDictionaryCreate: las texturas PNG no se cargaran (las skins se veran sin texturas si su .txd no carga)");
 }
 
+// Formas de ruta para RtPNGImageRead (3.1.21): el flujo de archivos de
+// RenderWare antepone una carpeta base a la ruta (como CFileMgr::OpenFile y
+// OS_FileOpen: verificado desensamblando OS_FileOpen 0x31b7cc, que antepone
+// la base de *(0x84b268)), asi que la ruta ABSOLUTA no abre (la base queda
+// pegada delante: "<base>/storage/..."). Por eso en 3.1.20 las 21 PNG
+// fallaron aunque el archivo existe y se lee bien con fopen/opendir. Se
+// prueban estas formas, en orden, y la primera que funciona se recuerda para
+// todas las PNG de la sesion:
+//   0 = relativa a files/ ("ARCXLoader/skinssuk/0400face.png")
+//   1 = con /files/ delante ("/files/ARCXLoader/skinssuk/0400face.png", como
+//       pone el readme de CustomCharacter: "/files/CustomCharacter/...")
+//   2 = absoluta (por si el flujo usara fopen directo)
+static int g_pngPathStyle = -1;   // -1 = aun no se sabe cual funciona
+static std::string PngPathForStyle(const std::string& absPath, int style) {
+    if (style == 2) return absPath;
+    size_t at = absPath.find("/files/");
+    if (at == std::string::npos) return absPath;   // sin "/files/": no hay forma relativa
+    if (style == 0) return absPath.substr(at + 7);          // despues de "/files/"
+    return absPath.substr(at);                               // desde "/files/"
+}
+
 // Carga un PNG como textura de RenderWare (3.1.20), siguiendo el flujo de
 // CustomCharacter (verificado desensamblando libCustomCharacter64.so):
 // RtPNGImageRead -> RwImageFindRasterFormat(imagen, 4, &a, &b, &c, &d) ->
@@ -732,8 +753,20 @@ static void InitPng(void* rtPngImageRead, void* rwImageFindRasterFormat, void* r
 // se queda (la textura lo usa, no se destruye).
 static void* LoadPngTexture(const std::string& path, const std::string& texName) {
     if (!g_rtPngImageRead || !g_rwImageFindRasterFormat || !g_rwRasterCreate || !g_rwRasterSetFromImage || !g_rwTextureCreate || !g_rwTextureSetName) return nullptr;
-    void* image = g_rtPngImageRead(path.c_str());
-    if (!image) { Log("    PNG '%s': RtPNGImageRead no pudo leerlo", path.c_str()); return nullptr; }
+    // Probar las formas de ruta (3.1.21). Si ya se sabe cual funciona, solo esa.
+    int styles[3] = {0, 1, 2};
+    int nStyles = 3;
+    if (g_pngPathStyle >= 0) { styles[0] = g_pngPathStyle; nStyles = 1; }
+    void* image = nullptr;
+    for (int i = 0; i < nStyles && !image; i++) {
+        std::string p = PngPathForStyle(path, styles[i]);
+        image = g_rtPngImageRead(p.c_str());
+        if (image && g_pngPathStyle < 0) {
+            g_pngPathStyle = styles[i];
+            Log("    PNG: la ruta que abre el juego es la forma %d ('%s')", styles[i], p.c_str());
+        }
+    }
+    if (!image) { Log("    PNG '%s': RtPNGImageRead no pudo leerlo (ninguna forma de ruta abrio el archivo)", path.c_str()); return nullptr; }
     int a = 0, b = 0, c = 0, d = 0;
     void* fmt = g_rwImageFindRasterFormat(image, 4, &a, &b, &c, &d);
     if (!fmt) { Log("    PNG '%s': RwImageFindRasterFormat no encontro formato", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
@@ -758,15 +791,20 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
 // se guarda en g_pngDicts: si al cargar una partida nueva la entrada se
 // resetea a null, se vuelve a registrar el mismo diccionario (sin recargar
 // los PNG). Se llama desde el watchdog del core cuando el IMG ya esta
-// registrado. Devuelve cuantas skins cargaron o re-registraron sus PNG en
-// esta llamada.
-static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins) {
+// registrado. Si una skin falla (ningun PNG cargo), se anota en
+// g_pngFailFrame y no se reintenta hasta pasados ~10 s (600 frames): en
+// 3.1.20 el reintento a cada frame lleno el log con 7371 lineas de error.
+// Devuelve cuantas skins cargaron o re-registraron sus PNG en esta llamada.
+static std::map<std::string, int> g_pngFailFrame;   // nombre de skin (minusculas) -> frame del ultimo fallo (enfriamiento de ~10 s)
+static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) {
     if (!g_rtPngImageRead || !g_rwTexDictionaryCreate || !g_rwTexDictionaryAddTexture || !g_txdFindSlot || !g_txdAddSlot || !g_txdAddRef) return 0;
     int done = 0;
     for (auto& s : skins) {
         if (s.src != 1) continue;
         if (s.pngCount <= 0) continue;
         std::string low = skinscan::Lower(s.name);
+        auto failIt = g_pngFailFrame.find(low);
+        if (failIt != g_pngFailFrame.end() && frame - failIt->second < 600) continue;   // enfriamiento tras un fallo: no se reintenta a cada frame
         int txdSlot = g_txdFindSlot(s.name.c_str());
         if (txdSlot < 0) {
             const char* p = !g_resolvedPath.empty() ? g_resolvedPath.c_str() : g_imgPath.c_str();
@@ -814,10 +852,11 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins) {
             if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    PNG '%s': no se pudo meter en el diccionario", p.first.c_str()); continue; }
             ok++;
         }
-        if (ok == 0) { Log("  PNG de '%s': ningun PNG cargo (se queda sin texturas)", s.name.c_str()); continue; }
+        if (ok == 0) { Log("  PNG de '%s': ningun PNG cargo (se queda sin texturas): se reintentara en ~10 s", s.name.c_str()); g_pngFailFrame[low] = frame; continue; }
         *(void**)entry = dict;
         g_txdAddRef(txdSlot);
         g_pngDicts[low] = dict;
+        g_pngFailFrame.erase(low);   // si antes fallo, ya no esta en enfriamiento
         Log("  texturas PNG de '%s' CARGADAS (%d textura(s), hueco %d): la skin ya se ve con texturas", s.name.c_str(), ok, txdSlot);
         done++;
     }
