@@ -105,14 +105,22 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.13: en 3.1.12 el .txd se pedia solo al registrar el IMG (precarga),
-// pero la skin seguia en blanco. Ahora tambien se pide al aplicar la skin,
-// junto con el .dff, antes de LoadAllRequestedModels (misma tanda), y se
-// registra el estado del modelo del .txd en su CStreamingInfo (+0x10:
-// 0 = no pedido, 1 = pidiendo, 2 = cargado) cuando la skin ya se puso. Si el
-// estado es 2 y la skin sigue en blanco, el .txd ESTA cargado y el problema
-// es que las texturas que pide el .dff no estan en el .txd (o el .dff apunta
-// a otro nombre de .txd).
+// 3.1.14: en 3.1.13 el .txd quedaba en estado 1 (pidiendo) siempre, nunca
+// llegaba a 2 (cargado). La causa: CStreaming::RequestModel NO mete los .txd
+// en la cola de peticiones. Desensamblado RequestModel (0x3949e0): para un
+// modelo de .txd (id en [20000, 24992], ver 0x394b94-0x394bac) solo pone el
+// estado a 1 y sale; la insercion en la cola doblemente enlazada (+0
+// siguiente, +2 anterior, 0x394bec-0x394c80) solo se hace para modelos
+// normales (id <= 19999). GetNextFileOnCd (0x395d7c) y RequestModelStream
+// (0x3963d0) solo sacan modelos DE ESA COLA, asi que el .txd nunca se
+// recogia. Por eso el estado se quedaba en 1 para siempre. La 3.1.14 mete el
+// modelo del .txd en la cola a mano (QueueModel), replicando la insercion
+// de RequestModel: cabeza de la cola = global 0x84adf0 (se localiza
+// escaneando RequestModel: adrp a 0x84a000 + ldr #0xdf0, unico), contador
+// de modelos pedidos = global 0x84a580 (adrp a 0x84a000 + ldr #0x580,
+// unico). Ademas se pone +4 = -1 (fin de la cadena "siguiente en el CD";
+// si quedara en 0, el streaming seguiria la cadena hasta el modelo 0) y el
+// estado a 2 (en la cola, como hace RequestModel al meter un modelo).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -507,6 +515,8 @@ static int (*g_txdFindSlot)(const char*) = nullptr;                        // CT
 static int (*g_txdAddSlot)(const char*, const char*, bool) = nullptr;     // CTxdStore::AddTxdSlot(nombre, rutaIMG, false) -> hueco
 static void (*g_infoSetCdPosnAndSize)(void*, uint32_t, uint32_t) = nullptr; // CStreamingInfo::SetCdPosnAndSize(this, offset, tamano)
 static void (*g_requestModel)(int, int) = nullptr;                          // CStreaming::RequestModel(modelo, flags) (opcional: pide un modelo/txd al streaming)
+static uintptr_t g_queueHeadGlobal = 0;   // direccion del global con la cabeza de la cola de peticiones (0 = no localizado)
+static uintptr_t g_reqCountGlobal = 0;    // direccion del global con el contador de modelos pedidos (0 = no localizado)
 
 static uintptr_t FindStreamingInfoGlobal(void* loadCdDirectoryFn) {
     if (!loadCdDirectoryFn) return 0;
@@ -555,6 +565,75 @@ static void InitTxd(void* loadCdDirectoryFn, int (*findSlot)(const char*), int (
     }
 }
 
+// Localiza un global del juego escaneando el codigo de CStreaming::RequestModel
+// (3.1.14): busca un adrp a la pagina dada seguido (hasta 4 instrucciones
+// despues) por un ldr de 64 bits con el desplazamiento dado y el mismo
+// registro destino. Devuelve la direccion del global o 0. Igual que
+// FindCdDirectoryGlobal/FindStreamingInfoGlobal pero para RequestModel (no se
+// comprueba la pagina absoluta: el .so carga en una base distinta de 0 y el
+// par adrp + ldr es unico en RequestModel para cada desplazamiento).
+static uintptr_t FindRequestModelGlobal(void* requestModelFn, uint32_t ldrImm) {
+    if (!requestModelFn) return 0;
+    const uint32_t* code = (const uint32_t*)requestModelFn;
+    const uintptr_t base = (uintptr_t)requestModelFn;
+    for (int i = 0; i < 0xB0; i++) {   // RequestModel mide 704 bytes = 176 palabras
+        uint32_t w = code[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;   // adrp
+        int32_t imm = (int32_t)(((w >> 5) & 0x7FFFF) << 2) | (int32_t)((w >> 29) & 0x3);
+        if (imm & 0x100000) imm -= 0x200000;
+        uintptr_t page = (base + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF;
+        uintptr_t target = page + ((uintptr_t)imm << 12);
+        int rd = (int)(w & 0x1F);
+        for (int j = 1; j <= 4; j++) {
+            uint32_t w2 = code[i + j];
+            if ((w2 & 0xFFC00000u) != 0xF9400000u) continue;   // ldr (offset sin signo, 64 bits)
+            uint32_t imm12 = (w2 >> 10) & 0xFFF;
+            int rn = (int)((w2 >> 5) & 0x1F);
+            if (imm12 * 8 == ldrImm && rn == rd) return target + ldrImm;
+        }
+    }
+    return 0;
+}
+
+// Localiza los globales de la cola de peticiones escaneando RequestModel
+// (3.1.14): la cabeza de la cola (ldr #0xdf0, pagina 0x84a000 -> 0x84adf0) y
+// el contador de modelos pedidos (ldr #0x580, pagina 0x84a000 -> 0x84a580).
+// Ambos pares son unicos en RequestModel (verificado contra el libGTASA.so).
+static void InitQueue(void* requestModelFn) {
+    g_queueHeadGlobal = FindRequestModelGlobal(requestModelFn, 0xdf0);
+    g_reqCountGlobal = FindRequestModelGlobal(requestModelFn, 0x580);
+    if (g_queueHeadGlobal) Log("cola de peticiones del juego localizada (global %p)", (void*)g_queueHeadGlobal);
+    else Log("no se pudo localizar la cola de peticiones: los .txd propios puede que no carguen");
+}
+
+// Mete un modelo en la cola de peticiones del juego (3.1.14), replicando la
+// insercion al principio de la lista que hace CStreaming::RequestModel para
+// los modelos normales (0x394bec-0x394c80). La cola es doblemente enlazada
+// con indices de modelo (int16): +0 siguiente, +2 anterior; la cabeza es un
+// centinela cuyo +0 es el primer modelo. Se pone el estado a 2 (en la cola).
+// Devuelve false si no se localizo la cabeza o el array.
+static bool QueueModel(int modelId) {
+    if (!g_queueHeadGlobal) return false;
+    void* arr = GetStreamingInfoArray();
+    if (!arr) return false;
+    void* head = *(void**)g_queueHeadGlobal;
+    if (!head) return false;
+    char* info = (char*)arr + (uintptr_t)modelId * 0x14;
+    int16_t headIdx = (int16_t)(((uintptr_t)head - (uintptr_t)arr) / 0x14);
+    int16_t oldFirst = *(int16_t*)head;            // +0 del centinela: primer modelo (o -1 si vacia)
+    *(int16_t*)(info + 0) = oldFirst;              // el modelo apunta al primero viejo
+    *(int16_t*)(info + 2) = headIdx;               // el modelo apunta atras al centinela
+    *(int16_t*)head = (int16_t)modelId;            // el centinela apunta al modelo
+    if (oldFirst != -1)
+        *(int16_t*)((char*)arr + (uintptr_t)(uint16_t)oldFirst * 0x14 + 2) = (int16_t)modelId;  // el primero viejo apunta atras al modelo
+    info[0x10] = 2;                                // estado = en la cola
+    if (g_reqCountGlobal) {
+        int* cnt = *(int**)g_reqCountGlobal;
+        if (cnt) *cnt = *cnt + 1;
+    }
+    return true;
+}
+
 // Registra un .txd propio en el CTxdStore y rellena su CStreamingInfo, como
 // hace LoadCdDirectory para los .txd (0x557a04-0x557b78). name ya viene
 // truncado en '.' ("suk"); imgPath es la ruta resuelta del IMG propio;
@@ -589,6 +668,7 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
     info[7] = (char)slot;             // indice de imagen (el slot del IMG propio)
     info[6] = 0;                      // campo +6 a 0, como hace el juego
     g_infoSetCdPosnAndSize(info, rawOffset, size);   // +8 offset, +12 tamano
+    *(int16_t*)(info + 4) = -1;      // +4 = fin de la cadena "siguiente en el CD" (3.1.14: si quedara en 0, el streaming seguiria hasta el modelo 0)
     Log("txd '%s' registrado (hueco %d, modelo %d, slot %d, offset %u, tamano %u sectores)", name, txdSlot, modelId, slot, rawOffset, size);
     // Pedir el .txd al streaming (3.1.12): registrarlo no lo carga. El juego
     // pide el .dff al aplicar la skin pero nunca pide el .txd, asi que hay
@@ -599,6 +679,11 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
     } else {
         Log("sin RequestModel: el .txd '%s' quedo registrado pero no se pidio (puede verse sin texturas)", name);
     }
+    // Meter el .txd en la cola de peticiones (3.1.14): RequestModel solo le
+    // pone estado 1 a los .txd, no los mete en la cola, y el streaming solo
+    // recoge modelos de esa cola. Sin esto el estado se queda en 1 siempre.
+    if (QueueModel(modelId)) Log("txd '%s' metido en la cola de carga (modelo %d, estado 2)", name, modelId);
+    else Log("txd '%s': no se pudo meter en la cola de carga (puede quedarse en estado 1 y no cargar)", name);
     return true;
 }
 

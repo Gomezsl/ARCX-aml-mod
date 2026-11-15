@@ -886,6 +886,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     LOGI("  %s _ZN10CStreaming15LoadCdDirectoryEPKci (solo para localizar el CDirectory; nunca se llama en partida)", loadCdDirFn ? "ok     " : "FALTA  ");
     loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
     loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize, RequestModel);
+    loader::InitQueue((void*)RequestModel);   // localiza la cabeza de la cola de peticiones (3.1.14: para meter los .txd en la cola)
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
