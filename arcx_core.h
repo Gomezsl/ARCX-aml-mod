@@ -31,7 +31,8 @@ static void  (*DeleteRwObject)(void*);                // CEntity::DeleteRwObject
 static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer (opcional, para volver a CJ)
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static int   (*AddImageToList)(const char*, bool);        // CStreaming::AddImageToList (opcional: registra el IMG propio; devuelve el slot)
-static void  (*LoadCdDirectory)(const char*, int);        // CStreaming::LoadCdDirectory (opcional: lee el directorio del IMG propio en el juego)
+static void (*CdDirAddItem)(void*, const void*);                     // CDirectory::AddItem (opcional: mete una entrada en el CDirectory del juego)
+static int  (*CdDirFindItem)(void*, const char*, uint32_t*, uint32_t*); // CDirectory::FindItem (opcional: busca una entrada en el CDirectory; 1 = esta)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
@@ -531,7 +532,7 @@ static bool ApplySkin(int idx, bool force = false) {
                 // el juego encuentre el archivo sin depender de ZyZ.
                 loader::InstallHook();
                 if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
-                    loader::RegisterImg(AddImageToList, LoadCdDirectory, CFileMgrOpenFile, CFileMgrCloseFile);
+                    loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile);
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
@@ -555,7 +556,7 @@ static bool ApplySkin(int idx, bool force = false) {
         g_pendingName.clear();
         g_coolName = name; g_coolFrame = g_frame;
         if (g_skins[idx].src == 1)
-            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd en el IMG propio (revisa en el log que diga 'el juego abre el IMG como ...' y 'directorio del IMG cargado'; si falta, CFileMgr no abre el IMG con ninguna ruta)", name.c_str());
+            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd en el IMG propio (revisa en el log que diga 'directorio del IMG cargado en el juego (slot N)' y 'CDirectory del juego localizado'; si falta, el CDirectory no se localizo o el IMG no se registro)", name.c_str());
         else
             LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;   // hecho (cancelado): no se queda pendiente
@@ -755,7 +756,7 @@ static void Watchdog() {
         if (!AddImageToList) {
             static bool said = false;
             if (!said) { said = true; LOGI("AddImageToList no esta en libGTASA.so: las skins propias no se registraran (las de ZyZ si funcionan)"); }
-        } else loader::RegisterImg(AddImageToList, LoadCdDirectory, CFileMgrOpenFile, CFileMgrCloseFile);
+        } else loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile);
     }
 
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
@@ -866,7 +867,14 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
     SYM(AddImageToList,                  "_ZN10CStreaming14AddImageToListEPKcb");   // opcional: registra el IMG propio de ARCXLoader (devuelve el slot)
-    SYM(LoadCdDirectory,                 "_ZN10CStreaming15LoadCdDirectoryEPKci");  // opcional: lee el directorio del IMG propio en el juego
+    SYM(CdDirAddItem,                    "_ZN10CDirectory7AddItemERKNS_13DirectoryInfoE");  // opcional: mete una entrada en el CDirectory del juego
+    SYM(CdDirFindItem,                   "_ZN10CDirectory8FindItemEPKcRjS2_");      // opcional: busca una entrada en el CDirectory (1 = esta)
+    // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
+    // dentro de GetEntry): solo se usa su direccion para localizar el objeto
+    // CDirectory escaneando su codigo (ver loader::FindCdDirectory).
+    void* loadCdDirFn = (void*)aml->GetSym(h, "_ZN10CStreaming15LoadCdDirectoryEPKci");
+    LOGI("  %s _ZN10CStreaming15LoadCdDirectoryEPKci (solo para localizar el CDirectory; nunca se llama en partida)", loadCdDirFn ? "ok     " : "FALTA  ");
+    loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");

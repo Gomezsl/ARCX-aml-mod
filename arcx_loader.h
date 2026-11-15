@@ -15,14 +15,17 @@
 // AddImageToList solo guarda la ruta y abre el archivo; el directorio del
 // IMG (que archivo esta en que offset) lo lee CStreaming::LoadCdDirectory,
 // que el juego solo ejecuta al cargar el nivel. Como el IMG propio se
-// registra ya dentro de la partida, hay que llamar a LoadCdDirectory aqui
-// mismo, con el indice de slot que devolvio AddImageToList. Sin eso, en
-// 3.1.4/3.1.5 el juego nunca encontraba 'suk.dff': CDirectory::FindItem
-// fallaba y RequestSpecialModel rellenaba la info del modelo con basura del
-// stack (no comprueba el resultado de FindItem), asi que el pedido nunca
-// cargaba y ademas atascaba el canal de carga y las skins de ZyZ que se
-// pedian despues tampoco cargaban. El gancho de fopen/open/openat queda solo
-// como diagnostico (por si el juego pidiera algun archivo suelto).
+// registra ya dentro de la partida, el directorio hay que cargarlo aqui
+// mismo. En 3.1.6 se intento llamando a LoadCdDirectory con el indice de
+// slot que devolvio AddImageToList, y en 3.1.7 eso CERRO el juego (ver abajo):
+// desde 3.1.8 el directorio se carga DIRECTO con CDirectory::AddItem. Sin el
+// directorio, en 3.1.4/3.1.5 el juego nunca encontraba 'suk.dff':
+// CDirectory::FindItem fallaba y RequestSpecialModel rellenaba la info del
+// modelo con basura del stack (no comprueba el resultado de FindItem), asi
+// que el pedido nunca cargaba y ademas atascaba el canal de carga y las
+// skins de ZyZ que se pedian despues tampoco cargaban. El gancho de
+// fopen/open/openat queda solo como diagnostico (por si el juego pidiera
+// algun archivo suelto).
 //
 // LA RUTA DEL IMG (3.1.7, verificado desensamblando CFileMgr::OpenFile
 // 0x4d2b74 y CStreaming::LoadCdDirectory 0x5578fc): LoadCdDirectory abre el
@@ -40,6 +43,26 @@
 // como ultimo recurso). Ademas BuildImg escribe una copia del IMG en la
 // carpeta "normal" (Android/data/... en vez de Android_unprotected/data/...),
 // por si la carpeta base del juego es esa y no la _unprotected.
+//
+// 3.1.8: LoadCdDirectory NO se puede llamar en partida (aunque la ruta abra
+// bien). En 3.1.7 el juego se cerró justo al llamarla: el crashlog muestra
+// SIGSEGV en CModelInfoAccelerator::GetEntry (libGTASA.so + 0x45D3DC), llamado
+// desde LoadCdDirectory (+248), que a su vez venía de ARCX. GetEntry, cuando
+// el acelerador no está en modo rápido, escribe en su tabla (un array que
+// está a NULL fuera de la carga de nivel: el registro X8 era 0 y el fallo
+// fue escribir 0xFFFF en NULL + 15339*2 = 0x77D6). El juego solo llama a
+// LoadCdDirectory al cargar el nivel, cuando la tabla sí está lista. Por
+// eso el directorio del IMG propio se carga DIRECTO, sin pasar por
+// LoadCdDirectory: ARCX lee su propio IMG (que él mismo escribió, formato
+// VER2) y mete cada entrada en el CDirectory del juego con
+// CDirectory::AddItem, que es justo lo que LoadCdDirectory hace para el
+// CDirectory (la parte que necesita RequestSpecialModel/FindItem; el relleno
+// de CStreamingInfo no hace falta para los personajes especiales, que van
+// por la ruta de FindItem). El objeto CDirectory no tiene símbolo público:
+// se localiza escaneando el código de LoadCdDirectory (su adrp a la página
+// 0x84c000 + ldr #0x180 apunta al global 0x84c180, verificado único en
+// LoadCdDirectory y en RequestSpecialModel). Si el escaneo falla, no se
+// registra nada (seguro: ZyZ sigue funcionando).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -314,18 +337,6 @@ static bool BuildImg(const std::vector<skinscan::Skin>& skins, const std::string
     return true;
 }
 
-// Registra el IMG en el sistema de streaming del juego (como hace ZyZ con el
-// suyo) y lee su directorio en el juego, para que FindItem encuentre los
-// .dff/.txd. Solo AddImageToList NO basta (verificado desensamblando
-// libGTASA.so 2.10): AddImageToList solo guarda la ruta y abre el archivo;
-// el directorio del IMG lo lee CStreaming::LoadCdDirectory, que el juego
-// solo ejecuta al cargar el nivel. Como el IMG propio se registra ya dentro
-// de la partida, hay que llamar a LoadCdDirectory aqui mismo, con el mismo
-// indice de slot que devolvio AddImageToList. Sin eso, en 3.1.4/3.1.5 el
-// juego nunca encontraba 'suk.dff' y el pedido quedaba atascado para siempre
-// (y atascaba tambien las skins de ZyZ que se pedian despues).
-// Solo una vez por sesion; si alguna funcion no existe en libGTASA.so, las
-// skins propias quedan como antes (se listan, no se aplican, sin crash).
 // Resuelve con que ruta abre el juego el IMG propio: se prueba cada
 // candidata con el propio CFileMgr::OpenFile del juego y se usa la primera
 // que abre. La relativa con barras invertidas es la que usan ZyZ y el juego;
@@ -363,9 +374,115 @@ static std::string ResolveImgPath(uint64_t (*openFile)(const char*, const char*)
 // el jugador esta en partida.
 static void ResetRegistration() { g_imgRegistered = false; }
 
-static bool RegisterImg(int (*addImageToList)(const char*, bool), void (*loadCdDirectory)(const char*, int), uint64_t (*openFile)(const char*, const char*), void (*closeFile)(uint64_t)) {
+// ---- CDirectory del juego (para cargar el directorio del IMG sin LoadCdDirectory) ----
+// El objeto CDirectory no tiene simbolo publico: se localiza escaneando el
+// codigo de CStreaming::LoadCdDirectory, que lee su puntero de un global con
+// "adrp x?, #0x84c000" + "ldr x?, [x?, #0x180]" (en 2.10, el global 0x84c180).
+static void* g_cdDir = nullptr;
+static void (*g_cdDirAddItem)(void*, const void*) = nullptr;              // CDirectory::AddItem(this, const DirectoryInfo&)
+static int (*g_cdDirFindItem)(void*, const char*, uint32_t*, uint32_t*) = nullptr; // CDirectory::FindItem(this, nombre, &offset, &tamano) -> 1 si lo encuentra
+
+static void* FindCdDirectory(void* loadCdDirectoryFn) {
+    if (!loadCdDirectoryFn) return nullptr;
+    const uint32_t* code = (const uint32_t*)loadCdDirectoryFn;
+    const uintptr_t base = (uintptr_t)loadCdDirectoryFn;
+    for (int i = 0; i < 0x13C; i++) {   // LoadCdDirectory mide ~0x500 bytes
+        uint32_t w = code[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;   // adrp: bit31=1, bit28=0
+        int32_t imm = (int32_t)(((w >> 5) & 0x7FFFF) << 2) | (int32_t)((w >> 29) & 0x3);
+        if (imm & 0x100000) imm -= 0x200000;   // extension de signo (21 bits)
+        uintptr_t page = (base + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF;
+        uintptr_t target = page + ((uintptr_t)imm << 12);
+        int rd = (int)(w & 0x1F);
+        for (int j = 1; j <= 4; j++) {
+            uint32_t w2 = code[i + j];
+            if ((w2 & 0xFFC00000u) != 0xF9400000u) continue;   // ldr (offset sin signo, 64 bits)
+            uint32_t imm12 = (w2 >> 10) & 0xFFF;
+            int rn = (int)((w2 >> 5) & 0x1F);
+            if (imm12 * 8 == 0x180 && rn == rd) {
+                uintptr_t globalAddr = target + 0x180;
+                void* cdDir = *(void**)globalAddr;
+                Log("CDirectory del juego localizado en %p (global %p)", cdDir, (void*)globalAddr);
+                return cdDir;
+            }
+        }
+    }
+    Log("no se pudo localizar el CDirectory del juego en el codigo de LoadCdDirectory: las skins propias no se registraran");
+    return nullptr;
+}
+
+static void InitCdDirectory(void* loadCdDirectoryFn, void (*addItem)(void*, const void*), int (*findItem)(void*, const char*, uint32_t*, uint32_t*)) {
+    g_cdDirAddItem = addItem;
+    g_cdDirFindItem = findItem;
+    g_cdDir = FindCdDirectory(loadCdDirectoryFn);
+}
+
+// Mete el directorio del IMG propio en el CDirectory del juego, entrada por
+// entrada, con CDirectory::AddItem (sin pasar por LoadCdDirectory, que en
+// partida se cae en GetEntry). Lee el IMG que ARCX mismo escribio (ruta
+// absoluta, fopen de libc: ARCX lo escribio ahi). El offset de cada entrada
+// lleva el indice del slot en el byte alto (como hace LoadCdDirectory); el
+// tamano se lee como medio de 16 bits en +4, y ARCX escribe sectores de 32
+// bits con la mitad alta en 0 (archivos pequenos), asi que se lee bien.
+// Las entradas que ya estan (re-registro tras cargar partida) se saltan con
+// FindItem, para no duplicarlas. AddItem se cae si el CDirectory esta lleno:
+// se comprueba la capacidad antes (+8 capacidad, +12 conteo).
+static bool LoadImgDirectory(int slot) {
+    if (!g_cdDir || !g_cdDirAddItem) {
+        Log("sin CDirectory del juego: el IMG se registro pero su directorio no se cargo (las skins propias no cargaran)");
+        return false;
+    }
+    FILE* f = fopen(g_imgPath.c_str(), "rb");
+    if (!f) { Log("no se pudo reabrir el IMG propio %s para cargar su directorio", g_imgPath.c_str()); return false; }
+    char magic[4]; uint32_t count = 0;
+    bool ok = fread(magic, 1, 4, f) == 4 && memcmp(magic, "VER2", 4) == 0 && fread(&count, 4, 1, f) == 1 && count > 0 && count < 1000;
+    if (!ok) { fclose(f); Log("el IMG propio no tiene cabecera VER2 valida: su directorio no se cargo"); return false; }
+    int32_t cap = *(int32_t*)((char*)g_cdDir + 8);
+    int32_t cur = *(int32_t*)((char*)g_cdDir + 12);
+    if (cur + (int32_t)count > cap) { fclose(f); Log("el CDirectory del juego esta lleno (%d/%d): no caben las %u entradas del IMG propio", cur, cap, count); return false; }
+    int added = 0, skipped = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t ent[32];
+        if (fread(ent, 1, 32, f) != 32) { ok = false; break; }
+        ent[31] = '\0';   // el nombre va en +8 (24 bytes); se termina en +31 como hace el juego
+        const char* name = (const char*)ent + 8;
+        if (name[0] == '\0') continue;
+        if (g_cdDirFindItem) {
+            uint32_t off = 0, sz = 0;
+            if (g_cdDirFindItem(g_cdDir, name, &off, &sz)) { skipped++; continue; }   // ya esta: no se duplica
+        }
+        uint32_t off = *(uint32_t*)ent;
+        off |= ((uint32_t)slot << 24);
+        *(uint32_t*)ent = off;
+        g_cdDirAddItem(g_cdDir, ent);
+        added++;
+    }
+    fclose(f);
+    if (!ok) { Log("el IMG propio se leyo incompleto: su directorio quedo a medias"); return false; }
+    Log("directorio del IMG cargado en el juego (slot %d): %d entrada(s) nuevas, %d ya estaban", slot, added, skipped);
+    return true;
+}
+
+// Registra el IMG en el sistema de streaming del juego (como hace ZyZ con el
+// suyo) y carga su directorio en el juego, para que FindItem encuentre los
+// .dff/.txd. Solo AddImageToList NO basta (verificado desensamblando
+// libGTASA.so 2.10): AddImageToList solo guarda la ruta y abre el archivo.
+// El directorio se carga DIRECTO con CDirectory::AddItem (ver arriba): NO se
+// llama a CStreaming::LoadCdDirectory en partida, porque en 3.1.7 se cerro
+// el juego ahi dentro (GetEntry con su tabla a NULL fuera de la carga de
+// nivel). Sin el directorio, en 3.1.4/3.1.5 el juego nunca encontraba
+// 'suk.dff' y el pedido quedaba atascado para siempre (y atascaba tambien
+// las skins de ZyZ que se pedian despues).
+// Solo una vez por sesion; si alguna funcion no existe en libGTASA.so, las
+// skins propias quedan como antes (se listan, no se aplican, sin crash).
+static bool RegisterImg(int (*addImageToList)(const char*, bool), uint64_t (*openFile)(const char*, const char*), void (*closeFile)(uint64_t)) {
     if (g_imgRegistered.load()) return true;
     if (!g_imgBuilt.load() || !addImageToList) return false;
+    if (!g_cdDir || !g_cdDirAddItem) {
+        static bool said = false;
+        if (!said) { said = true; Log("no se pudo localizar el CDirectory del juego: el IMG propio no se registrara (las de ZyZ si funcionan)"); }
+        return false;
+    }
     std::string path = ResolveImgPath(openFile, closeFile);
     if (path.empty()) return false;   // ninguna ruta abre el IMG: no se registra (registrarlo atasca el canal)
     int idx = addImageToList(path.c_str(), true);
@@ -374,14 +491,9 @@ static bool RegisterImg(int (*addImageToList)(const char*, bool), void (*loadCdD
         if (!said) { said = true; Log("no hay hueco libre en la lista de imagenes del juego: el IMG propio no se registro"); }
         return false;
     }
-    if (loadCdDirectory) {
-        loadCdDirectory(path.c_str(), idx);
-        Log("directorio del IMG cargado en el juego (slot %d, ruta '%s'): el juego ya puede encontrar las skins propias", idx, path.c_str());
-    } else {
-        Log("LoadCdDirectory no esta en libGTASA.so: el IMG se registro pero el juego no leera su directorio (las skins propias no cargaran)");
-    }
+    if (!LoadImgDirectory(idx)) return false;
     g_imgRegistered = true;
-    Log("IMG registrado en el juego: %s (las skins propias ya se pueden pedir)", path.c_str());
+    Log("IMG registrado en el juego: %s (slot %d, las skins propias ya se pueden pedir)", path.c_str(), idx);
     return true;
 }
 static bool ImgReady() { return g_imgBuilt.load(); }
