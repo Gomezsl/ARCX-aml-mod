@@ -88,6 +88,16 @@ static int g_reapplyDelay = 0;
 static int g_autoTries = 0;
 static bool g_giveUp = false;
 static int g_nextTryFrame = 0;
+// Contador de confirmacion (3.1.24): el modelo del jugador se lee una vez
+// por frame y puede dar 0 UN SOLO frame mientras el juego cambia el modelo
+// por su cuenta (carga, mision, descarga del streaming). Antes, un solo
+// frame con modelo != 299 disparaba el reaplicado, y el SetModelIndex de
+// ARCX corria contra el cambio del juego: el crash intermitente en
+// CStreaming::RenderEntity (prev del CLink = 0x3F8000, 1 de cada 3 veces
+// con Ghost). Ahora se exige que el modelo este mal 30 frames seguidos
+// (~0.5 s a 60 fps, ~1 s a 30 fps) antes de reaplicar: un glitch de un
+// frame no dispara nada.
+static int g_wrongModelFrames = 0;
 // Estado de una peticion en curso: se pide UNA sola vez y luego se espera a
 // que cargue (sin volver a pedir). La comprobacion previa de 3.1.1-3.1.3
 // (GetModelInfoByName ANTES de pedir) bloqueaba TODAS las skins: el nombre
@@ -821,10 +831,18 @@ static void Watchdog() {
     if (allowed && g_desired >= 0 && g_curSkin == g_desired && g_miOff >= 0) {
         int cur = ReadPedModel(ped);   // el guardado o la carga pudieron devolver al jugador a CJ
         if (cur != (int)g_wornModelId) {
-            static int mlog = 0;
-            if (mlog++ < 20) LOGI("el modelo del jugador cambio a %d (esperado %u): se vuelve a poner la skin", cur, g_wornModelId);
-            g_curSkin = -1;
-            g_needReapply = true; g_reapplyDelay = 20;
+            // 3.1.24: confirmar 30 frames seguidos antes de reaplicar (ver
+            // g_wrongModelFrames). Un solo frame en 0 es un glitch del juego,
+            // no una perdida real de la skin.
+            if (++g_wrongModelFrames >= 30) {
+                static int mlog = 0;
+                if (mlog++ < 20) LOGI("el modelo del jugador cambio a %d (esperado %u, %d frames seguidos): se vuelve a poner la skin", cur, g_wornModelId, g_wrongModelFrames);
+                g_curSkin = -1;
+                g_needReapply = true; g_reapplyDelay = 20;
+                g_wrongModelFrames = 0;
+            }
+        } else {
+            g_wrongModelFrames = 0;
         }
     }
     if (g_needReapply && allowed && g_desired >= 0 && g_desired < (int)g_skins.size() && !g_giveUp) {
@@ -891,6 +909,18 @@ static void* RwTextureRead_hook(const char* name, const char* mask) {
             uint32_t rc = *(uint32_t*)((char*)tex + 0x64);
             *(uint32_t*)((char*)tex + 0x64) = rc + 1;
             return tex;
+        }
+        // 3.1.23 (diagnostico): registrar los nombres que el juego pide y NO son
+        // una PNG nuestra, una sola vez por nombre y con tope de 40 por sesion
+        // (el juego pide texturas constantemente; sin tope el log se llenaria).
+        // Asi se confirma si al cargar suk el juego pide "040bmp" (la textura
+        // de efecto del pelo trasero que no existe en el .txd ni en las PNG).
+        static std::map<std::string, bool> s_missLogged;
+        static int s_missCount = 0;
+        if (s_missCount < 40 && s_missLogged.find(name) == s_missLogged.end()) {
+            s_missLogged[name] = true;
+            s_missCount++;
+            LOGI("RwTextureRead: textura pedida y NO en nuestras PNG: '%s'", name);
         }
     }
     return RwTextureRead_orig(name, mask);

@@ -35,10 +35,10 @@
 #include "arcx_loader.h"
 #include "arcx_ui.h"
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.22-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.24-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define ARCX_VERSION "3.1.22-beta"
+#define ARCX_VERSION "3.1.24-beta"
 
 static void Log(const char* fmt, ...) {
     va_list ap;

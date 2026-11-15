@@ -153,12 +153,43 @@ static void Log(const char* fmt, ...) {
 // ---- escaneo de ARCXLoader/ -------------------------------------------------
 // Una carpeta = una skin. Dentro: un .dff (el modelo), un .txd (texturas) y
 // .png/.jpg sueltos (se cuentan). Tambien valen .dff sueltos en la raiz.
+// Recoge las imagenes de una carpeta Y sus subcarpetas (3.1.24): Ghost traia
+// sus 32 PNG en "Without alpha" dentro de su carpeta y ARCX solo miraba el
+// nivel superior, asi que contaba png: 0 y no cargaba ninguna textura.
+// Profundidad maxima 4. El .dff y el .txd se siguen buscando SOLO en el
+// nivel superior (un .dff en una subcarpeta no es el modelo de la skin).
+static void CollectImagesRecursive(const std::string& dir, std::vector<std::pair<std::string, std::string>>* pngs,
+                                   int* jpgCount, int depth) {
+    if (depth > 4) return;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    while (dirent* e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n.empty() || n[0] == '.') continue;
+        std::string full = dir + "/" + n;
+        struct stat st;
+        if (stat(full.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            CollectImagesRecursive(full, pngs, jpgCount, depth + 1);
+        } else if (S_ISREG(st.st_mode)) {
+            if (skinscan::EndsWith(n, ".png")) {
+                if (pngs) {
+                    std::string texName = n.substr(0, n.size() - 4);
+                    if (!texName.empty() && texName.size() <= 32) pngs->push_back({texName, full});
+                }
+            } else if (skinscan::EndsWith(n, ".jpg") || skinscan::EndsWith(n, ".jpeg")) {
+                if (jpgCount) (*jpgCount)++;
+            }
+        }
+    }
+    closedir(d);
+}
+
 static void ScanPack(const std::string& packDir, const std::string& packName,
                      std::vector<skinscan::Skin>& out, std::vector<std::string>* rejected) {
     DIR* d = opendir(packDir.c_str());
     if (!d) return;
     std::string dffPath, txdPath;
-    int pngs = 0, jpgs = 0;
     while (dirent* e = readdir(d)) {
         std::string n = e->d_name;
         if (n.empty() || n[0] == '.') continue;
@@ -169,13 +200,14 @@ static void ScanPack(const std::string& packDir, const std::string& packName,
             if (dffPath.empty()) dffPath = full;
         } else if (skinscan::EndsWith(n, ".txd")) {
             if (txdPath.empty()) txdPath = full;
-        } else if (skinscan::EndsWith(n, ".png")) {
-            pngs++;
-        } else if (skinscan::EndsWith(n, ".jpg") || skinscan::EndsWith(n, ".jpeg")) {
-            jpgs++;
         }
     }
     closedir(d);
+    // Las PNG/JPG se cuentan en la carpeta y sus subcarpetas (3.1.24).
+    std::vector<std::pair<std::string, std::string>> pngList;
+    int jpgs = 0;
+    CollectImagesRecursive(packDir, &pngList, &jpgs, 0);
+    int pngs = (int)pngList.size();
     if (dffPath.empty()) {
         if (pngs + jpgs > 0)
             Log("  carpeta '%s': solo texturas sueltas (%d png, %d jpg), sin .dff: no es una skin", packName.c_str(), pngs, jpgs);
@@ -772,6 +804,12 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
     void* fmt = g_rwImageFindRasterFormat(image, 4, &a, &b, &c, &d);
     if (!fmt) { Log("    PNG '%s': RwImageFindRasterFormat no encontro formato", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
     if (b < 1 || a < 1) { Log("    PNG '%s': dimensiones invalidas (%d x %d)", path.c_str(), a, b); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    // 3.1.23 (diagnostico de transparencia): registrar el formato de raster que
+    // le toca a cada PNG (a, b = tamano; c = profundidad; d = formato). Si una PNG
+    // con alfa (cejas, labios, pelo) recibe un formato sin alfa (p. ej. 565), el
+    // alfa se pierde al copiar la imagen al raster. Con este log se ve por textura
+    // si el formato tiene alfa o no, sin adivinar.
+    Log("    PNG '%s': raster a=%d b=%d profundidad=%d formato=%d", texName.c_str(), a, b, c, d);
     void* raster = g_rwRasterCreate(b, a, d, c);
     if (!raster) { Log("    PNG '%s': RwRasterCreate fallo", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
     if (!g_rwRasterSetFromImage(raster, image)) { Log("    PNG '%s': RwRasterSetFromImage fallo", path.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
@@ -837,22 +875,9 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
             continue;
         }
         if (curDict) { Log("  PNG de '%s': el .txd ya tiene diccionario (hueco %d): las PNG no lo sobrescriben", s.name.c_str(), txdSlot); g_pngDicts[low] = curDict; continue; }
-        // Escanear la carpeta de la skin por .png
+        // Escanear la carpeta de la skin por .png (incluidas subcarpetas, 3.1.24)
         std::vector<std::pair<std::string, std::string>> pngs;   // (nombre de textura, ruta)
-        DIR* d = opendir(s.dir.c_str());
-        if (!d) continue;
-        while (dirent* e = readdir(d)) {
-            std::string n = e->d_name;
-            if (n.empty() || n[0] == '.') continue;
-            if (!skinscan::EndsWith(n, ".png")) continue;
-            std::string full = s.dir + "/" + n;
-            struct stat st;
-            if (stat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            std::string texName = n.substr(0, n.size() - 4);
-            if (texName.empty() || texName.size() > 32) continue;
-            pngs.push_back({texName, full});
-        }
-        closedir(d);
+        CollectImagesRecursive(s.dir, &pngs, nullptr, 0);
         if (pngs.empty()) continue;
         void* dict = g_rwTexDictionaryCreate();
         if (!dict) { Log("  PNG de '%s': RwTexDictionaryCreate fallo", s.name.c_str()); continue; }
