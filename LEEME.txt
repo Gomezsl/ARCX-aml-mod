@@ -1,6 +1,7 @@
-PROJECT ARCX (beta) by Hunter09  -  version 3.1.2-beta
+PROJECT ARCX (beta) by Hunter09  -  version 3.1.3-beta
 Un solo plugin AML (arm64) para GTA SA 2.10 + ZyZ ModLoader: detecta las skins y las pone al jugador, con menu tactil propio.
-Nuevo en 3.1.2 (arreglo de carga): la carpeta ARCXLoader ahora se crea en TODAS las rutas de datos que existan, no solo en la detectada, y el log escribe su ruta exacta. El gancho de fopen ya no se instala al arrancar el juego: se instala solo al aplicar la primera skin propia, para que el arranque no toque la memoria del juego. Y la comprobacion de registro del nombre ahora solo se aplica a las skins de ZyZ: las propias no se bloquean (el juego no puede conocer su nombre antes de pedirlas).
+Nuevo en 3.1.3 (arreglo de Ajustes y del cierre al aplicar skins propias): los interruptores de ZYZ y ARCXLoader ya muestran su estado real al momento (antes se quedaban con el estado viejo: los dos parecian encendidos a la vez y cada toque volvia a releer toda la carpeta, por eso tardaba en cargar). Y la comprobacion de registro del nombre ahora se aplica TAMBIEN a las skins propias: en 3.1.2 se saltaba para ellas y pedir una skin que el juego no conoce cerraba el juego al segundo intento (crash en CStreaming::RequestSpecialModel). Ahora, si el juego no conoce la skin propia, no se pide y se cancela a los ~5 s con un mensaje en el log, sin cerrar el juego. Ademas el cargador ahora tambien vigila open/openat (diagnostico): si el juego pide los archivos por ahi en vez de por fopen, quedara en el log.
+Nuevo en 3.1.2 (arreglo de carga): la carpeta ARCXLoader ahora se crea en TODAS las rutas de datos que existan, no solo en la detectada, y el log escribe su ruta exacta. El gancho de fopen ya no se instala al arrancar el juego: se instala solo al aplicar la primera skin propia, para que el arranque no toque la memoria del juego. (La 3.1.2 tambien quito la comprobacion de registro para las skins propias pensando que pedirlas era lo que hacia que el juego buscara el archivo: fue un error, era lo que cerraba el juego; la 3.1.3 la devuelve para todas las skins.)
 Nuevo en 3.1.1: antes de pedir una skin de ZyZ se comprueba que el juego ya registro su nombre; si ZyZ aun no lo cargo, no se pide y se reintenta (antes podia cerrarse el juego dentro de CStreaming::RequestSpecialModel). Nuevo en 3.1.0: cargador propio ARCXLoader, con su propio apartado en Ajustes, sin depender de ZyZ ModLoader.
 
 ARCHIVOS DEL CODIGO (raiz del repo)
@@ -38,8 +39,17 @@ DOS FUENTES DE SKINS (se juntan en una sola lista)
      Como se cargan: el plugin redirige el fopen del juego para los archivos
      registrados (<nombre>.dff / <nombre>.txd). Es la misma tecnica que usan
      los modloaders y queda anotada en ARCXLog.txt como "fopen: ... -> ...".
-     Si el juego no pidiera los archivos por ahi, el log dira "no cargo" y
-     la skin quedara bloqueada como hasta ahora, sin crash.
+     ESTADO HONESTO (probado en 3.1.2): el gancho se instala bien y la tabla
+     tiene los archivos, pero el juego NUNCA pidio 'suk.dff'/'suk.txd' por
+     fopen (cero redirecciones en el log): sin registro previo del nombre, el
+     juego ni siquiera llega a pedir el archivo, asi que la skin propia se
+     lista pero NO se puede aplicar todavia; el menu la rechaza sin cerrar
+     el juego. La 3.1.3 tambien vigila open/openat para ver si el juego pide
+     los archivos por ahi: si el log muestra "open: ... -> ..." o
+     "openat: ... -> ...", el archivo SI se puede servir y solo faltaria el
+     registro; si no muestra nada, el registro es el paso que falta.
+     Mientras tanto, las skins de ZyZ (modloader/) siguen cargando como
+     siempre: ZyZ es el que registra los nombres.
 
 AJUSTES (pestana AJUSTES del menu)
   GENERAL: recordar ultima skin, bloquear boton.

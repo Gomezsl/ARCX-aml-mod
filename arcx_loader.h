@@ -17,6 +17,7 @@
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
 #pragma once
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <atomic>
 #include <dirent.h>
+#include <fcntl.h>
 #include <link.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -192,6 +194,70 @@ static FILE* FopenHook(const char* path, const char* mode) {
     return g_fopenOrig(path, mode);
 }
 
+// ---- diagnostico: el juego puede pedir los archivos por open/openat --------
+// En 3.1.2 el gancho de fopen se instalo bien y la tabla tenia 2 archivos, pero
+// el juego NUNCA pidio 'suk.dff'/'suk.txd' por fopen (cero redirecciones en el
+// log): sin registro previo del nombre, el juego ni siquiera llega a pedir el
+// archivo. Estos ganchos comprueban si lo pide por open/openat en su lugar.
+// El filtro por extension va ANTES de mirar la tabla, para no frenar al juego
+// (open/openat se llaman muchisimo): sin .dff/.txd no se toca el mutex.
+// Solo se desvian lecturas de archivos registrados; lo demas pasa tal cual.
+static int (*g_openOrig)(const char*, int, ...) = nullptr;
+static int (*g_openatOrig)(int, const char*, int, ...) = nullptr;
+static std::atomic<int> g_openLogs{0};
+
+static bool IsModelFile(const char* base) {
+    size_t n = strlen(base);
+    if (n < 4) return false;
+    const char* ext = base + n - 4;
+    auto eq = [](const char* a, const char* b) {
+        for (int i = 0; i < 4; i++) {
+            char ca = a[i], cb = b[i];
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cb >= 'A' && cb <= 'Z') cb += 32;
+            if (ca != cb) return false;
+        }
+        return true;
+    };
+    return eq(ext, ".dff") || eq(ext, ".txd");
+}
+
+static int OpenHook(const char* path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = va_arg(ap, mode_t); va_end(ap); }
+    if (path && (flags & O_ACCMODE) == O_RDONLY && g_openOrig) {
+        const char* base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (IsModelFile(base)) {
+            std::string to = Lookup(skinscan::Lower(base).c_str());
+            if (!to.empty()) {
+                int n = g_openLogs.fetch_add(1);
+                if (n < 20) Log("open: '%s' -> '%s'", path, to.c_str());
+                return g_openOrig(to.c_str(), flags, mode);
+            }
+        }
+    }
+    return g_openOrig ? g_openOrig(path, flags, mode) : -1;
+}
+
+static int OpenAtHook(int dirfd, const char* path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = va_arg(ap, mode_t); va_end(ap); }
+    if (path && (flags & O_ACCMODE) == O_RDONLY && g_openatOrig) {
+        const char* base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (IsModelFile(base)) {
+            std::string to = Lookup(skinscan::Lower(base).c_str());
+            if (!to.empty()) {
+                int n = g_openLogs.fetch_add(1);
+                if (n < 20) Log("openat: '%s' -> '%s'", path, to.c_str());
+                return g_openatOrig(dirfd, to.c_str(), flags, mode);
+            }
+        }
+    }
+    return g_openatOrig ? g_openatOrig(dirfd, path, flags, mode) : -1;
+}
+
 // Parchea la entrada GOT de fopen en libGTASA.so (mismo patron que el menu
 // usa para eglSwapBuffers). Solo afecta a las llamadas que hace el juego.
 static bool PatchGot(const char* libName, const char* sym, void* repl, void** orig) {
@@ -255,6 +321,13 @@ static bool InstallHook() {
     }
     g_hookInstalled = true;
     Log("fopen redirigido: las skins de ARCXLoader se sirven desde su carpeta");
+    // Diagnostico: si el juego pide los archivos por open/openat en vez de
+    // fopen, se redirigen igual (solo .dff/.txd registrados, solo lectura).
+    // Si el log no muestra ninguna de las tres, el juego nunca pide el archivo.
+    if (PatchGot("libGTASA.so", "open", (void*)OpenHook, (void**)&g_openOrig))
+        Log("open redirigido (diagnostico)");
+    if (PatchGot("libGTASA.so", "openat", (void*)OpenAtHook, (void**)&g_openatOrig))
+        Log("openat redirigido (diagnostico)");
     return true;
 }
 

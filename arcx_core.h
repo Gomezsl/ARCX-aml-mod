@@ -127,6 +127,7 @@ static void SaveSettings() {        // ARCXConfigs.ini, seccion [General] (la in
         g["zyz"] = zyz ? "1" : "0";       // apartado ZyZ ModLoader activado
         g["loader"] = ldr ? "1" : "0";    // apartado ARCXLoader (propio) activado
     });
+    PublishState();   // la interfaz ve el cambio enseguida: los interruptores ya no muestran estados viejos
 }
 static void LoadSettings() {
     vsa::Ini ini = vsa::CfgRead();
@@ -142,6 +143,8 @@ static void LoadSettings() {
     std::lock_guard<std::mutex> lk(g_pubMtx);
     g_pubRemember = g_remember;
     g_pubTitle = g_title;
+    g_pubZyzOn = g_zyzOn;        // si no se publican aqui, la interfaz arranca
+    g_pubLoaderOn = g_loaderOn;  // mostrando los dos apartados en ON aunque el INI diga OFF
 }
 // marca la skin que se esta aplicando: si el juego se cierra en medio, al arrancar se avisa en el log
 static void MarkApplying(const std::string& n) { vsa::CfgUpdate([&](vsa::Ini& ini) { ini["Debug"]["applying"] = n; }); }
@@ -240,6 +243,7 @@ static void ConsumeScan() {
         }
     }
     WriteList();
+    PublishState();   // conteos y apartados al momento: la interfaz ya no muestra estados viejos
 }
 
 // Debe llamarse en el hilo del juego (lo hacemos desde el hook de CGame::Process).
@@ -422,20 +426,25 @@ static bool ApplySkin(int idx, bool force = false) {
     LOGI("aplicando '%s'...", name.c_str());
     g_notRegistered = false;
     if (g_skins[idx].src == 1) {
-        // Skin PROPIA (ARCXLoader): el juego no puede conocer el nombre antes de
-        // pedirlo (nadie lo registro todavia); la peticion es lo que hace que el
-        // juego busque el archivo, asi que no se comprueba el registro y se instala
-        // aqui el gancho de fopen, justo antes de pedirla.
+        // Skin PROPIA (ARCXLoader): se instala aqui el gancho de archivos, justo
+        // antes de pedirla, para que el arranque no toque la memoria del juego.
         loader::InstallHook();
-    } else if (GetModelInfoByName && !force) {
-        // Skin de ZyZ: el juego ya debe conocer el nombre. Si ZyZ aun no registro
-        // el .dff, RequestSpecialChar se cae dentro de CStreaming::RequestSpecialModel
-        // (crash real: SEGV al pedir 'suk' con el modelo 299). La busqueda por nombre
-        // es segura: si no esta, devuelve null y se reintenta sin pedirla.
+    }
+    if (GetModelInfoByName && !force) {
+        // El juego tiene que conocer el nombre ANTES de pedirlo. Si no lo registro
+        // nadie, RequestSpecialChar se cae dentro de CStreaming::RequestSpecialModel
+        // (crash real: SEGV al pedir 'suk' con el modelo 299; en 3.1.2 se pidio
+        // igual para las propias y el juego se cerro al segundo intento). La
+        // busqueda por nombre es segura: si no esta, devuelve null y se reintenta
+        // sin pedirla. Vale tambien para las propias: el gancho de archivos solo
+        // sirve el .dff si el juego lo pide por nombre, y sin registro nunca lo pide.
         int preIdx = -1;
         void* preMi = GetModelInfoByName(name.c_str(), &preIdx);
         if (!preMi || preIdx < 0) {
-            LOGI("  el juego aun no registro '%s' (ZyZ no lo ha cargado): no se pide, se reintenta", name.c_str());
+            if (g_skins[idx].src == 1)
+                LOGI("  el juego aun no conoce '%s' (el cargador propio no lo registro): no se pide, se reintenta", name.c_str());
+            else
+                LOGI("  el juego aun no registro '%s' (ZyZ no lo ha cargado): no se pide, se reintenta", name.c_str());
             g_notRegistered = true;
             return false;   // la peticion sigue viva: el watchdog lo vuelve a intentar
         }
@@ -445,7 +454,10 @@ static bool ApplySkin(int idx, bool force = false) {
     bool loaded = HasSpecialCharLoaded(g_slot);
     LOGI("  HasSpecialCharLoaded = %d", (int)loaded);
     if (!loaded) {
-        LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
+        if (g_skins[idx].src == 1)
+            LOGI("skin '%s' no cargo: el juego la conoce pero no pudo cargar su .dff/.txd (el cargador propio no logro servir el archivo)", name.c_str());
+        else
+            LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;
     }
     unsigned modelId = 290u + g_slot;   // valor por defecto; se corrige con el indice real que devuelve el juego
@@ -657,7 +669,10 @@ static void Watchdog() {
             if (ok) { g_pending = -2; g_notRegFrames = 0; }
             else if (g_notRegistered) {   // el modelo no estaba registrado: reintentar ~5 s y cancelar
                 if (++g_notRegFrames > 300) {
-                    LOGI("se cancela el cambio: el juego no registro la skin (mira ZyZModLoader.log)");
+                    if (p >= 0 && p < (int)g_skins.size() && g_skins[p].src == 1)
+                        LOGI("se cancela el cambio: el juego no conoce la skin propia '%s' (el cargador propio aun no puede registrarla: el juego nunca pide su archivo)", g_skins[p].name.c_str());
+                    else
+                        LOGI("se cancela el cambio: el juego no registro la skin (mira ZyZModLoader.log)");
                     g_pending = -2; g_notRegFrames = 0; WriteStatus("");
                 }
             } else g_notRegFrames = 0;
