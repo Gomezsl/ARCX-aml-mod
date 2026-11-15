@@ -105,15 +105,17 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.17 (CORRECCION DEL CONGELAMIENTO DE 3.1.16): QueueModel ya no vuelve
-// a meter un modelo que ya esta en la cola. En 3.1.16, al aplicar la skin,
-// RequestTxd (con QueueModel) se llamaba dos veces para el mismo .txd (una
-// en la espera de ApplySkin y otra tras RequestSpecialChar), y el .txd ya
-// estaba en la cola desde el registro: meterlo otra vez hacia que su +0
-// apuntara a si mismo (bucle en la lista doblemente enlazada) y el juego
-// se congelaba dentro de GetNextFileOnCd al recorrer la cola. Ahora
-// QueueModel recorre la lista desde la cabeza siguiendo +0 y, si el modelo
-// ya esta, devuelve true sin tocar nada.
+// 3.1.18 (VUELTA A 3.1.15, ESTABLE): en 3.1.16/3.1.17 el juego se seguia
+// congelando al usar la skin aunque QueueModel ya revisaba si el modelo
+// estaba en la cola. El problema es meter el .txd en la cola al aplicar:
+// el juego puede estar cargandolo en ese momento y tocar la cola ahi
+// corrompe el recorrido. Por eso en 3.1.18 el .txd SOLO se mete en la cola
+// una vez, al registrar el IMG (RegisterTxd, como en 3.1.15, que no se
+// cerraba ni se congelaba); al aplicar solo se pide con RequestModel (sin
+// tocar la cola) y se quita la espera del .txd de ApplySkin. La skin se
+// pone (en blanco si el .txd no cargo) y el juego no se congela. Ademas
+// LogTxdStatus ahora vuelca los 20 bytes del CStreamingInfo del .txd, para
+// ver por que no termina de cargar y atacar las texturas por otro camino.
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -712,36 +714,18 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
 // la skin seguia en blanco: pedirlo tambien al aplicar cubre el caso de que
 // la precarga no lo cargara o se descargara. Devuelve el modelo del .txd o
 // -1 si no esta registrado o falta RequestModel.
-// 3.1.16: tambien lo vuelve a meter en la cola (QueueModel). Si un cambio de
-// nivel/partida vacio la cola despues del registro, el .txd quedaba fuera y
-// RequestModel solo le ponia estado 1 sin volver a meterlo; al re-meterlo
-// aqui el streaming lo recoge aunque la cola se haya vaciado.
+// 3.1.18: ya NO se vuelve a meter en la cola aqui. En 3.1.16/3.1.17 meter el
+// .txd en la cola al aplicar (cuando ya estaba en la cola desde el registro)
+// congelaba el juego; el .txd solo se mete en la cola UNA vez, al registrar
+// el IMG (RegisterTxd, como en 3.1.15, que no se cerraba ni se congelaba).
 static int RequestTxd(const char* name) {
     if (!g_txdFindSlot || !g_requestModel) return -1;
     int txdSlot = g_txdFindSlot(name);
     if (txdSlot < 0) { Log("  txd de '%s': no esta registrado (FindTxdSlot = -1)", name); return -1; }
     int modelId = txdSlot + 0x4e20;
     g_requestModel(modelId, 0);
-    if (QueueModel(modelId)) Log("  txd de '%s' pedido al aplicar y metido en la cola (modelo %d)", name, modelId);
-    else Log("  txd de '%s' pedido al aplicar (modelo %d)", name, modelId);
+    Log("  txd de '%s' pedido al aplicar (modelo %d)", name, modelId);
     return modelId;
-}
-
-// Dice si el .txd de una skin ya termino de cargar (3.1.16): el estado del
-// modelo del .txd en su CStreamingInfo (+0x10) es 3 o 4 cuando esta cargado
-// (2 = en la cola, 1 = pidiendo/cargando, 0 = no pedido). Si no se puede
-// comprobar (sin array o sin FindTxdSlot), devuelve true para no bloquear
-// la skin (se aplica como antes).
-static bool TxdLoaded(const char* name) {
-    if (!g_txdFindSlot) return true;
-    int txdSlot = g_txdFindSlot(name);
-    if (txdSlot < 0) return true;
-    void* arr = GetStreamingInfoArray();
-    if (!arr) return true;
-    int modelId = txdSlot + 0x4e20;
-    const uint8_t* info = (const uint8_t*)arr + (uintptr_t)modelId * 0x14;
-    uint8_t st = info[0x10];
-    return st == 3 || st == 4;
 }
 
 // Diagnostico (3.1.13): estado del modelo del .txd en su CStreamingInfo
@@ -759,6 +743,12 @@ static void LogTxdStatus(const char* name) {
     const uint8_t* info = (const uint8_t*)arr + (uintptr_t)modelId * 0x14;
     Log("  txd de '%s': hueco %d, modelo %d, estado = %d (0=no pedido, 1=pidiendo, 2=cargado), imagen %d, offset %u, tamano %u",
         name, txdSlot, modelId, info[0x10], info[7], *(const uint32_t*)(info + 8), *(const uint32_t*)(info + 12));
+    // Volcado completo de los 20 bytes del CStreamingInfo (3.1.18): para ver
+    // por que el .txd no termina de cargar (+0/+2 = enlaces de la cola,
+    // +4 = siguiente en el CD, +6 = banderas, +7 = imagen, +8 = offset,
+    // +12 = tamano, +0x10 = estado).
+    Log("  txd de '%s': info = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+        name, info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7], info[8], info[9], info[10], info[11], info[12], info[13], info[14], info[15], info[16], info[17], info[18], info[19]);
 }
 
 // Mete el directorio del IMG propio en el CDirectory del juego, entrada por
