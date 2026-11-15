@@ -1171,6 +1171,82 @@ static void* FindPngTexture(const char* name) {
     return it != g_pngTextures.end() ? it->second : nullptr;
 }
 
+// ---- Auditor de texturas del .dff (3.1.28) ----
+// Lee el .dff de una skin propia y saca los nombres de textura que piden
+// sus materiales (chunk Texture 0x6: Struct con el filtro + String con el
+// nombre + String con la mascara + Extension; el nombre es el primer
+// String), y los compara con las texturas que ARCX ya tiene en la cache
+// por nombre (g_pngTextures: PNG, JPG y .txd decodificado por software).
+// Asi el log dice SIEMPRE si al .dff le falta alguna textura (el material
+// que la pide sale blanco) o si estan todas. Es la pieza que faltaba para
+// diagnosticar un "se ve mal" sin adivinar: si falta una textura, el
+// problema es de carga; si no falta ninguna, el problema esta en el propio
+// .dff (sus UV o sus materiales) y hay que mirar el archivo, no el
+// cargador. El recorrido de chunks esta validado en Python contra suk.dff
+// (21 texturas) y Ghost.dff (30 texturas). Solo lee y registra; no cambia
+// nada de la carga. Se llama una sola vez por skin y sesion (g_auditedSkins)
+// desde LoadPngForSkins: a las de solo .txd cuando se las salta (sus
+// texturas ya estan en cache desde LoadTxdViaSoftware) y a las de PNG/JPG
+// justo despues de cargarlas. La cache es global, asi que una textura de
+// otra skin contaria como presente (en la practica los nombres son
+// propios de cada skin).
+static std::map<std::string, int> g_auditedSkins;   // nombre de skin (minusculas) -> 1 si ya se audito en esta sesion
+static void AuditDffTextures(const skinscan::Skin& s) {
+    std::string low = skinscan::Lower(s.name);
+    if (g_auditedSkins.count(low)) return;
+    g_auditedSkins[low] = 1;
+    FILE* f = fopen(s.path.c_str(), "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 32L * 1024 * 1024) { fclose(f); return; }
+    std::vector<uint8_t> buf((size_t)len);
+    if (fread(buf.data(), 1, (size_t)len, f) != (size_t)len) { fclose(f); return; }
+    fclose(f);
+    auto rd32 = [&](size_t o) -> uint32_t { uint32_t v = 0; memcpy(&v, buf.data() + o, 4); return v; };
+    std::vector<std::string> wanted;
+    struct Range { size_t off, end; int depth; };
+    std::vector<Range> stack;
+    stack.push_back({0, buf.size(), 0});
+    while (!stack.empty()) {
+        Range r = stack.back(); stack.pop_back();
+        size_t off = r.off;
+        while (off + 12 <= r.end) {
+            uint32_t typ = rd32(off), size = rd32(off + 4);
+            if (off + 12 + (size_t)size > r.end) break;   // chunk invalido: se para en este nivel
+            if (typ == 0x6) {
+                size_t p = off + 12, e = off + 12 + size;
+                int seenStr = 0;
+                while (p + 12 <= e) {
+                    uint32_t t2 = rd32(p), s2 = rd32(p + 4);
+                    if (p + 12 + (size_t)s2 > e) break;
+                    if (t2 == 0x2 && ++seenStr == 1) {
+                        size_t nl = strnlen((const char*)buf.data() + p + 12, s2);
+                        if (nl > 0) wanted.emplace_back((const char*)buf.data() + p + 12, nl);
+                    }
+                    p += 12 + s2;
+                }
+            } else if (typ == 0x10 || typ == 0x1a || typ == 0xf || typ == 0x8 || typ == 0x7 || typ == 0xe || typ == 0x14) {
+                if (r.depth < 8) stack.push_back({off + 12, off + 12 + size, r.depth + 1});
+            }
+            off += 12 + size;
+        }
+    }
+    if (wanted.empty()) { Log("  auditor .dff de '%s': no se encontraron texturas en sus materiales", s.name.c_str()); return; }
+    std::sort(wanted.begin(), wanted.end());
+    wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+    std::vector<std::string> missing;
+    for (auto& w : wanted)
+        if (g_pngTextures.find(skinscan::Lower(w)) == g_pngTextures.end()) missing.push_back(w);
+    if (missing.empty())
+        Log("  auditor .dff de '%s': el .dff pide %d textura(s) y TODAS estan cargadas", s.name.c_str(), (int)wanted.size());
+    else {
+        Log("  auditor .dff de '%s': el .dff pide %d textura(s) y FALTAN %d (esas partes saldran blancas):", s.name.c_str(), (int)wanted.size(), (int)missing.size());
+        for (auto& m : missing) Log("    FALTA textura '%s'", m.c_str());
+    }
+}
+
 // Carga las texturas PNG de las skins propias (3.1.20). Para cada skin propia
 // con .png en su carpeta: si su entrada del CTxdStore ya tiene un diccionario
 // (el .txd cargo bien con LoadTxdDirect), las PNG no lo tocan: el .txd manda.
@@ -1191,7 +1267,7 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
     int done = 0;
     for (auto& s : skins) {
         if (s.src != 1) continue;
-        if (s.pngCount + s.jpgCount <= 0) continue;
+        if (s.pngCount + s.jpgCount <= 0) { if (s.hasTxd) AuditDffTextures(s); continue; }   // 3.1.28: las de solo .txd se auditan aqui (sus texturas ya estan en cache desde LoadTxdViaSoftware)
         std::string low = skinscan::Lower(s.name);
         auto failIt = g_pngFailFrame.find(low);
         if (failIt != g_pngFailFrame.end() && frame - failIt->second < 600) continue;   // enfriamiento tras un fallo: no se reintenta a cada frame
@@ -1246,6 +1322,7 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
         g_pngDicts[low] = dict;
         g_pngFailFrame.erase(low);   // si antes fallo, ya no esta en enfriamiento
         Log("  texturas de '%s' CARGADAS (%d textura(s), hueco %d): la skin ya se ve con texturas", s.name.c_str(), ok, txdSlot);
+        AuditDffTextures(s);   // 3.1.28: ahora que sus PNG/JPG estan en cache, se comprueba que el .dff no pida nada que falte
         done++;
     }
     return done;
