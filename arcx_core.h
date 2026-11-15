@@ -532,7 +532,7 @@ static bool ApplySkin(int idx, bool force = false) {
                 // el juego encuentre el archivo sin depender de ZyZ.
                 loader::InstallHook();
                 if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
-                    loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile);
+                    loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile, g_frame);
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
@@ -756,7 +756,7 @@ static void Watchdog() {
         if (!AddImageToList) {
             static bool said = false;
             if (!said) { said = true; LOGI("AddImageToList no esta en libGTASA.so: las skins propias no se registraran (las de ZyZ si funcionan)"); }
-        } else loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile);
+        } else loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile, g_frame);
     }
 
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
