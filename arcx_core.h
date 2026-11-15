@@ -63,6 +63,8 @@ static int g_reapplyDelay = 0;
 static int g_autoTries = 0;
 static bool g_giveUp = false;
 static int g_nextTryFrame = 0;
+static bool g_notRegistered = false;   // ApplySkin: el juego aun no registro el nombre (se reintenta, no se pide)
+static int g_notRegFrames = 0;        // frames seguidos sin registro en una peticion del menu (se cancela a los ~5 s)
 static int g_miOff = -1;                   // offset de CEntity::m_nModelIndex dentro del ped (se calibra solo)
 static unsigned g_wornModelId = 0;
 static const volatile uint8_t* g_cutPtr = nullptr;    // CCutsceneMgr::ms_running
@@ -418,6 +420,26 @@ static bool ApplySkin(int idx, bool force = false) {
         return true;
     }
     LOGI("aplicando '%s'...", name.c_str());
+    g_notRegistered = false;
+    if (g_skins[idx].src == 1) {
+        // Skin PROPIA (ARCXLoader): el juego no puede conocer el nombre antes de
+        // pedirlo (nadie lo registro todavia); la peticion es lo que hace que el
+        // juego busque el archivo, asi que no se comprueba el registro y se instala
+        // aqui el gancho de fopen, justo antes de pedirla.
+        loader::InstallHook();
+    } else if (GetModelInfoByName && !force) {
+        // Skin de ZyZ: el juego ya debe conocer el nombre. Si ZyZ aun no registro
+        // el .dff, RequestSpecialChar se cae dentro de CStreaming::RequestSpecialModel
+        // (crash real: SEGV al pedir 'suk' con el modelo 299). La busqueda por nombre
+        // es segura: si no esta, devuelve null y se reintenta sin pedirla.
+        int preIdx = -1;
+        void* preMi = GetModelInfoByName(name.c_str(), &preIdx);
+        if (!preMi || preIdx < 0) {
+            LOGI("  el juego aun no registro '%s' (ZyZ no lo ha cargado): no se pide, se reintenta", name.c_str());
+            g_notRegistered = true;
+            return false;   // la peticion sigue viva: el watchdog lo vuelve a intentar
+        }
+    }
     RequestSpecialChar(g_slot, name.c_str(), 0);
     LoadAllRequestedModels(false);
     bool loaded = HasSpecialCharLoaded(g_slot);
@@ -630,8 +652,15 @@ static void Watchdog() {
             g_busySince = 0;
             WriteStatus("");
             MarkApplying(p >= 0 && p < (int)g_skins.size() ? g_skins[p].name : std::string("CJ"));
-            if (ApplySkin(p, g_force.load())) g_pending = -2;
+            bool ok = ApplySkin(p, g_force.load());
             ClearApplying();                                   // llegamos aqui = no hubo crash
+            if (ok) { g_pending = -2; g_notRegFrames = 0; }
+            else if (g_notRegistered) {   // el modelo no estaba registrado: reintentar ~5 s y cancelar
+                if (++g_notRegFrames > 300) {
+                    LOGI("se cancela el cambio: el juego no registro la skin (mira ZyZModLoader.log)");
+                    g_pending = -2; g_notRegFrames = 0; WriteStatus("");
+                }
+            } else g_notRegFrames = 0;
         }
     }
 
@@ -731,7 +760,8 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     LOGI("  %s _ZN5CGame7ProcessEv", process ? "ok     " : "FALTA  ");
     #undef SYM
 
-    loader::InstallHook();   // redireccion de fopen: las skins propias se sirven desde ARCXLoader/
+    // El gancho de fopen NO se instala al arrancar: se instala al aplicar la
+    // primera skin propia (en ApplySkin), para que el arranque no toque la memoria del juego.
     StartScan();   // en segundo plano: la lista llega por ConsumeScan en el hilo del juego
 
     if (!RequestSpecialChar || !LoadAllRequestedModels || !HasSpecialCharLoaded ||

@@ -1,0 +1,64 @@
+PROJECT ARCX (beta) by Hunter09  -  version 3.1.2-beta
+Un solo plugin AML (arm64) para GTA SA 2.10 + ZyZ ModLoader: detecta las skins y las pone al jugador, con menu tactil propio.
+Nuevo en 3.1.2 (arreglo de carga): la carpeta ARCXLoader ahora se crea en TODAS las rutas de datos que existan, no solo en la detectada, y el log escribe su ruta exacta. El gancho de fopen ya no se instala al arrancar el juego: se instala solo al aplicar la primera skin propia, para que el arranque no toque la memoria del juego. Y la comprobacion de registro del nombre ahora solo se aplica a las skins de ZyZ: las propias no se bloquean (el juego no puede conocer su nombre antes de pedirlas).
+Nuevo en 3.1.1: antes de pedir una skin de ZyZ se comprueba que el juego ya registro su nombre; si ZyZ aun no lo cargo, no se pide y se reintenta (antes podia cerrarse el juego dentro de CStreaming::RequestSpecialModel). Nuevo en 3.1.0: cargador propio ARCXLoader, con su propio apartado en Ajustes, sin depender de ZyZ ModLoader.
+
+ARCHIVOS DEL CODIGO (raiz del repo)
+  ARCX.cpp          entrada del plugin (OnModLoad), rutas
+  arcx_core.h       nucleo: busca skins (.dff con huesos), las aplica, vigila cinematicas/misiones/guardados/coches
+  arcx_loader.h     cargador propio: escanea ARCXLoader/ y redirige los archivos .dff/.txd al juego
+  arcx_ui.h         interfaz ImGui: boton con logo, panel deslizable, redimensionable, temas, idiomas
+  arcx_common.h     log unico, ARCXConfigs.ini
+  skinscan.h        deteccion de skins; arcx_logo.h  logo 128x128 embebido
+  Android.mk, Application.mk, .github/workflows/build.yml
+  (SkinSelector.cpp, SkinSelectorMenu.cpp y vestidor_common.h ya no se usan: se pueden borrar del repo)
+
+INSTALACION
+  Copia libARCX64.so a la carpeta mods del juego. Borra libARCXMenu64.so, libVestidorSA64.so y libVestidorSAMenu64.so si existen.
+
+ARCHIVOS QUE CREA
+  Android/data/com.rockstargames.gtasa/configs/ARCXConfigs.ini   todos los ajustes ([General] [Menu] [Skins] [Sources] [Debug])
+  Android/data/com.rockstargames.gtasa/ARCXLog.txt                log unico (lineas [main] [core] [ui] [loader])
+  (la carpeta files/ARCX/ de versiones anteriores ya no se usa)
+
+DOS FUENTES DE SKINS (se juntan en una sola lista)
+  1. ZyZ ModLoader (modloader/): como hasta ahora. El .dff/.txd/.png lo carga ZyZ.
+     Se puede apagar en Ajustes > ZYZ MODLOADER.
+  2. ARCXLoader (propio, files/ARCXLoader/): una subcarpeta por skin:
+       ARCXLoader/Myskin/skin.dff
+       ARCXLoader/Myskin/skins.txd      (o cualquier .txd: es el que trae las texturas)
+       ARCXLoader/Myskin/textura.png    (se listan; las texturas van en el .txd)
+     El nombre del modelo es el del .dff sin extension (max. 23 caracteres).
+     Si dos carpetas traen un .dff con el mismo nombre, solo entra la primera
+     y la otra queda anotada en el log como duplicada. Si una skin existe en
+     las dos fuentes, se queda la de ARCXLoader.
+     Las texturas .png/.jpg sueltas se inventarian y se cuentan, pero NO se
+     convierten a texturas: para que la skin se vea con texturas necesita su
+     .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
+     Como se cargan: el plugin redirige el fopen del juego para los archivos
+     registrados (<nombre>.dff / <nombre>.txd). Es la misma tecnica que usan
+     los modloaders y queda anotada en ARCXLog.txt como "fopen: ... -> ...".
+     Si el juego no pidiera los archivos por ahi, el log dira "no cargo" y
+     la skin quedara bloqueada como hasta ahora, sin crash.
+
+AJUSTES (pestana AJUSTES del menu)
+  GENERAL: recordar ultima skin, bloquear boton.
+  ZYZ MODLOADER: interruptor para activar/apagar esa fuente, "Releer modloader/",
+    y el conteo de skins que encontro.
+  ARCXLOADER (PROPIO): interruptor para activar/apagar el cargador propio,
+    "Releer ARCXLoader/", conteo de skins propias y de png/jpg sueltos.
+  APARIENCIA: idioma (ES/EN/ID), color (5 temas), tamano del boton, opacidad.
+  ACERCA DE: version del plugin.
+
+COMPORTAMIENTO FIJO (ya no son opciones)
+  - La skin se mantiene durante las misiones y se quita solo en cinematicas.
+  - Se puede cambiar de skin dentro del vehiculo (se restaura la animacion de sentado); al subir o bajar espera a que termine.
+  - A pie se limpian las tareas (agachado, peleando...) antes de cambiar el modelo; en pausa no se cambia nada.
+MENU
+  - Boton redondo con el logo ARCX: toque = abrir, arrastrar = mover. Se carga con el jugador ya en juego (~2 s), a la par de los widgets del HUD.
+  - El boton SOLO se ve en partida, con el jugador en pantalla y sin pausa. En pausa, en carga o en menus no aparece (es a proposito).
+  - Su posicion se guarda en ARCXConfigs.ini, seccion [Menu], button_x/button_y. Si lo arrastraste a un sitio raro o quedo detras de otro mod,
+    borra esas dos lineas (o toda la seccion [Menu]) y vuelve al sitio por defecto: borde izquierdo, a un tercio de la pantalla.
+  - Panel: las listas se deslizan con el dedo (con inercia); mas de 40 skins pasan a otra pagina. Arrastra la cabecera para moverlo
+    y la esquina inferior derecha (tres rayas) para cambiar su tamano. Posicion y tamano se guardan.
+  - Ajustes: recordar ultima skin, bloquear boton, releer cada fuente por separado, idioma (ES/EN/ID), color (5 temas), tamano del boton, opacidad.

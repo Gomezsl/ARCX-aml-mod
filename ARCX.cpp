@@ -35,10 +35,10 @@
 #include "arcx_loader.h"
 #include "arcx_ui.h"
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.0-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.2-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define ARCX_VERSION "3.1.0-beta"
+#define ARCX_VERSION "3.1.2-beta"
 
 static void Log(const char* fmt, ...) {
     va_list ap;
@@ -71,12 +71,18 @@ extern "C" void OnModLoad() {
 
     const std::string cfgDir = base + "/configs";
     mkdir(cfgDir.c_str(), 0777);
-    mkdir((files + "/ARCXLoader").c_str(), 0777);   // carpeta del cargador propio (una subcarpeta por skin)
+    // Carpeta del cargador propio: se crea en la ruta detectada y en cualquier
+    // otra ruta de datos que exista, para que aparezca seguro donde el juego guarda sus archivos.
+    for (auto d : kFilesDirs) {
+        struct stat st;
+        if (stat(d, &st) == 0) mkdir((std::string(d) + "/ARCXLoader").c_str(), 0777);
+    }
     vsa::g_cfgPath = cfgDir + "/ARCXConfigs.ini";    // todos los ajustes en un solo archivo
     vsa::g_logPath = base + "/ARCXLog.txt";          // un solo log
     vsa::LogInit(ARCX_VERSION);
     Log("== Project ARCX %s cargado ==", ARCX_VERSION);
     Log("datos: %s", base.c_str());
+    Log("ARCXLoader: %s", (files + "/ARCXLoader").c_str());
 
     // si la ultima skin aplicada no termino, el juego se cerro en medio
     {
