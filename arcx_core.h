@@ -30,7 +30,8 @@ static void  (*SetModelIndex)(void*, unsigned int);   // CPed::SetModelIndex
 static void  (*DeleteRwObject)(void*);                // CEntity::DeleteRwObject (opcional)
 static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer (opcional, para volver a CJ)
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
-static void  (*AddImageToList)(const char*, bool);        // CStreaming::AddImageToList (opcional: registra el IMG propio)
+static int   (*AddImageToList)(const char*, bool);        // CStreaming::AddImageToList (opcional: registra el IMG propio; devuelve el slot)
+static void  (*LoadCdDirectory)(const char*, int);        // CStreaming::LoadCdDirectory (opcional: lee el directorio del IMG propio en el juego)
 static void  (*CGame_Process_orig)();
 static void  (*CGame_InitRestart_orig)();
 static void  (*CGame_ShutRestart_orig)();
@@ -452,6 +453,27 @@ static bool ApplySkin(int idx, bool force = false) {
         LOGI("skin '%s' bloqueada: el .dff no tiene huesos (no es un ped). Crashearia el juego.", name.c_str());
         return true;
     }
+    // ---- otra skin cargandose en el slot: no se pide una nueva hasta que termine ----
+    // En 3.1.5 tocar varias skins seguidas (og->suk->wmy->xt) cambiaba el
+    // objetivo del slot a cada toque y NINGUNA llegaba a cargar, ni las de
+    // ZyZ (que en 3.1.4 cargaban bien una a una): el juego necesita que el
+    // pedido termine antes de cambiar de objetivo. La peticion nueva queda
+    // en cola (el watchdog vuelve a llamar) y arranca en cuanto la anterior
+    // se resuelve. Si la anterior termino, no se aplica (el jugador ya
+    // eligio otra): solo se libera el slot para la nueva.
+    if (g_applyWaiting && g_applyIdx != idx) {
+        if (HasSpecialCharLoaded(g_slot)) {
+            g_applyWaiting = false; g_applyIdx = -2;
+            g_slotReqName.clear(); g_slotReqFrame = -100000;
+        } else if (g_frame - g_applyFrame > 300) {
+            // La anterior se agoto sin cargar: se libera el slot para la
+            // nueva (sin enfriamiento: si se vuelve a pedir la anterior, el
+            // control de 3.1.5 por nombre ya frena el reintento 10 s).
+            g_applyWaiting = false; g_applyIdx = -2;
+        } else {
+            return false;   // todavia cargando la anterior: se espera sin pedir
+        }
+    }
     // ---- fase 1: pedir (una sola vez por intento) ----
     // No hay comprobacion previa del nombre: GetModelInfoByName ANTES de pedir
     // siempre devuelve null para una skin nueva (el nombre solo entra en la
@@ -483,7 +505,7 @@ static bool ApplySkin(int idx, bool force = false) {
                 // el juego encuentre el archivo sin depender de ZyZ.
                 loader::InstallHook();
                 if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
-                    loader::RegisterImg(AddImageToList);
+                    loader::RegisterImg(AddImageToList, LoadCdDirectory);
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
@@ -504,7 +526,7 @@ static bool ApplySkin(int idx, bool force = false) {
         g_applyIdx = -2;
         g_coolName = name; g_coolFrame = g_frame;
         if (g_skins[idx].src == 1)
-            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd (el IMG propio no lo registro o la skin no esta en el IMG: reinicia el juego tras anadir skins)", name.c_str());
+            LOGI("skin '%s' no cargo: el juego no encontro su .dff/.txd en el IMG propio (revisa que la skin este en ARCXLoader y que el log diga 'directorio del IMG cargado'; si falta, LoadCdDirectory no esta en libGTASA.so)", name.c_str());
         else
             LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;   // hecho (cancelado): no se queda pendiente
@@ -703,7 +725,7 @@ static void Watchdog() {
         if (!AddImageToList) {
             static bool said = false;
             if (!said) { said = true; LOGI("AddImageToList no esta en libGTASA.so: las skins propias no se registraran (las de ZyZ si funcionan)"); }
-        } else loader::RegisterImg(AddImageToList);
+        } else loader::RegisterImg(AddImageToList, LoadCdDirectory);
     }
 
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
@@ -813,7 +835,8 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
-    SYM(AddImageToList,                  "_ZN10CStreaming14AddImageToListEPKcb");   // opcional: registra el IMG propio de ARCXLoader
+    SYM(AddImageToList,                  "_ZN10CStreaming14AddImageToListEPKcb");   // opcional: registra el IMG propio de ARCXLoader (devuelve el slot)
+    SYM(LoadCdDirectory,                 "_ZN10CStreaming15LoadCdDirectoryEPKci");  // opcional: lee el directorio del IMG propio en el juego
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
     LOGI("  %s CPedIntelligence::ClearTaskDuckSecondary", ClearTaskDuckSecondary ? "ok" : "FALTA");
     g_pauseUser = (const volatile uint8_t*)aml->GetSym(h, "_ZN6CTimer11m_UserPauseE");

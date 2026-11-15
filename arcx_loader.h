@@ -5,16 +5,24 @@
 // en modloader/). Si dos carpetas traen un .dff con el mismo nombre, solo
 // entra la primera y la otra queda registrada en el log como duplicada.
 //
-// COMO CARGA EL JUEGO LOS MODELOS (probado en 3.1.2 y 3.1.3): el juego NO abre
-// los .dff/.txd sueltos por fopen/open/openat (cero redirecciones en los logs
-// aunque los ganchos estaban instalados): los carga desde archivos .img
-// registrados en su sistema de streaming. ZyZ hace exactamente eso: construye
-// su ZYZML\GTA3.IMG y lo registra con CStreaming::AddImageToList (su .so lo
-// confirma: "_ZN10CStreaming14AddImageToListEPKcb"). El cargador propio hace
-// lo mismo: construye arcxml/gta3.img dentro de ARCXLoader/ con los .dff/.txd
-// de las skins propias y lo registra en el juego, asi RequestSpecialChar
-// encuentra el archivo sin depender de ZyZ. El gancho de fopen/open/openat
-// queda solo como diagnostico (por si el juego pidiera algun archivo suelto).
+// COMO CARGA EL JUEGO LOS MODELOS (verificado desensamblando libGTASA.so
+// 2.10, que Daniel paso del APK): el juego NO abre los .dff/.txd sueltos por
+// fopen/open/openat (cero redirecciones en los logs aunque los ganchos estaban
+// instalados): los carga desde archivos .img registrados en su sistema de
+// streaming. ZyZ hace exactamente eso: construye su ZYZML\GTA3.IMG y lo
+// registra con CStreaming::AddImageToList (su .so lo confirma:
+// "_ZN10CStreaming14AddImageToListEPKcb"). PERO solo registrarlo NO basta:
+// AddImageToList solo guarda la ruta y abre el archivo; el directorio del
+// IMG (que archivo esta en que offset) lo lee CStreaming::LoadCdDirectory,
+// que el juego solo ejecuta al cargar el nivel. Como el IMG propio se
+// registra ya dentro de la partida, hay que llamar a LoadCdDirectory aqui
+// mismo, con el indice de slot que devolvio AddImageToList. Sin eso, en
+// 3.1.4/3.1.5 el juego nunca encontraba 'suk.dff': CDirectory::FindItem
+// fallaba y RequestSpecialModel rellenaba la info del modelo con basura del
+// stack (no comprueba el resultado de FindItem), asi que el pedido nunca
+// cargaba y ademas atascaba el canal de carga y las skins de ZyZ que se
+// pedian despues tampoco cargaban. El gancho de fopen/open/openat queda solo
+// como diagnostico (por si el juego pidiera algun archivo suelto).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -265,12 +273,32 @@ static bool BuildImg(const std::vector<skinscan::Skin>& skins, const std::string
 }
 
 // Registra el IMG en el sistema de streaming del juego (como hace ZyZ con el
-// suyo). Solo una vez por sesion; si la funcion no existe en libGTASA.so, las
+// suyo) y lee su directorio en el juego, para que FindItem encuentre los
+// .dff/.txd. Solo AddImageToList NO basta (verificado desensamblando
+// libGTASA.so 2.10): AddImageToList solo guarda la ruta y abre el archivo;
+// el directorio del IMG lo lee CStreaming::LoadCdDirectory, que el juego
+// solo ejecuta al cargar el nivel. Como el IMG propio se registra ya dentro
+// de la partida, hay que llamar a LoadCdDirectory aqui mismo, con el mismo
+// indice de slot que devolvio AddImageToList. Sin eso, en 3.1.4/3.1.5 el
+// juego nunca encontraba 'suk.dff' y el pedido quedaba atascado para siempre
+// (y atascaba tambien las skins de ZyZ que se pedian despues).
+// Solo una vez por sesion; si alguna funcion no existe en libGTASA.so, las
 // skins propias quedan como antes (se listan, no se aplican, sin crash).
-static bool RegisterImg(void (*addImageToList)(const char*, bool)) {
+static bool RegisterImg(int (*addImageToList)(const char*, bool), void (*loadCdDirectory)(const char*, int)) {
     if (g_imgRegistered.load()) return true;
     if (!g_imgBuilt.load() || !addImageToList) return false;
-    addImageToList(g_imgPath.c_str(), true);
+    int idx = addImageToList(g_imgPath.c_str(), true);
+    if (idx <= 0) {   // 0 = sin hueco libre en la lista de imagenes (8 max; el slot 0 es gta3.img, nunca libre)
+        static bool said = false;
+        if (!said) { said = true; Log("no hay hueco libre en la lista de imagenes del juego: el IMG propio no se registro"); }
+        return false;
+    }
+    if (loadCdDirectory) {
+        loadCdDirectory(g_imgPath.c_str(), idx);
+        Log("directorio del IMG cargado en el juego (slot %d): el juego ya puede encontrar las skins propias", idx);
+    } else {
+        Log("LoadCdDirectory no esta en libGTASA.so: el IMG se registro pero el juego no leera su directorio (las skins propias no cargaran)");
+    }
     g_imgRegistered = true;
     Log("IMG registrado en el juego: %s (las skins propias ya se pueden pedir)", g_imgPath.c_str());
     return true;
