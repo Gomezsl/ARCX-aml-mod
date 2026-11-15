@@ -105,14 +105,17 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.15 (CORRECCION DEL CRASH DE 3.1.14): la cabeza de la cola es
-// *(*(0x84adf0)) (DOBLE desreferencia), no *(0x84adf0). En 3.1.14 se uso una
-// sola desreferencia, asi que se escribio el id del modelo (23025) encima de
-// los 2 bytes bajos del puntero de la cabeza y el juego se cerro al cargar
-// una partida dentro de GetNextFileOnCd (0x395e44, fault 0x0). Ahora
-// QueueModel hace la doble desreferencia y valida que la cabeza este dentro
-// del array CStreamingInfo y que los indices sean sanos antes de tocar
-// nada; si algo no cuadra, no se mete en la cola y se registra el motivo.
+// 3.1.16: en 3.1.15 ya no se cerraba el juego y el .txd se metia en la
+// cola (estado 2), pero al aplicar la skin el estado volvia a 1 y la skin
+// seguia en blanco. Dos causas posibles: (a) un cambio de nivel/partida
+// vacia la cola despues del registro, y al aplicar RequestModel solo ponia
+// estado 1 sin volver a meter el .txd en la cola; (b) el personaje se crea
+// con el .txd sin cargar y se queda en blanco aunque el .txd cargue
+// despues. La 3.1.16 ataca las dos: RequestTxd ahora tambien vuelve a meter
+// el .txd en la cola (QueueModel) cada vez que se pide, y ApplySkin, para
+// skins propias, espera a que el .txd este cargado (estado 3 o 4, nuevo
+// TxdLoaded) antes de pedir el .dff, hasta ~5 s; si no carga, se aplica
+// igual (se vera en blanco, como antes).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -699,14 +702,36 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
 // la skin seguia en blanco: pedirlo tambien al aplicar cubre el caso de que
 // la precarga no lo cargara o se descargara. Devuelve el modelo del .txd o
 // -1 si no esta registrado o falta RequestModel.
+// 3.1.16: tambien lo vuelve a meter en la cola (QueueModel). Si un cambio de
+// nivel/partida vacio la cola despues del registro, el .txd quedaba fuera y
+// RequestModel solo le ponia estado 1 sin volver a meterlo; al re-meterlo
+// aqui el streaming lo recoge aunque la cola se haya vaciado.
 static int RequestTxd(const char* name) {
     if (!g_txdFindSlot || !g_requestModel) return -1;
     int txdSlot = g_txdFindSlot(name);
     if (txdSlot < 0) { Log("  txd de '%s': no esta registrado (FindTxdSlot = -1)", name); return -1; }
     int modelId = txdSlot + 0x4e20;
     g_requestModel(modelId, 0);
-    Log("  txd de '%s' pedido al aplicar (modelo %d)", name, modelId);
+    if (QueueModel(modelId)) Log("  txd de '%s' pedido al aplicar y metido en la cola (modelo %d)", name, modelId);
+    else Log("  txd de '%s' pedido al aplicar (modelo %d)", name, modelId);
     return modelId;
+}
+
+// Dice si el .txd de una skin ya termino de cargar (3.1.16): el estado del
+// modelo del .txd en su CStreamingInfo (+0x10) es 3 o 4 cuando esta cargado
+// (2 = en la cola, 1 = pidiendo/cargando, 0 = no pedido). Si no se puede
+// comprobar (sin array o sin FindTxdSlot), devuelve true para no bloquear
+// la skin (se aplica como antes).
+static bool TxdLoaded(const char* name) {
+    if (!g_txdFindSlot) return true;
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) return true;
+    void* arr = GetStreamingInfoArray();
+    if (!arr) return true;
+    int modelId = txdSlot + 0x4e20;
+    const uint8_t* info = (const uint8_t*)arr + (uintptr_t)modelId * 0x14;
+    uint8_t st = info[0x10];
+    return st == 3 || st == 4;
 }
 
 // Diagnostico (3.1.13): estado del modelo del .txd en su CStreamingInfo

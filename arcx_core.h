@@ -92,6 +92,8 @@ static int g_coolFrame = -100000;
 // (el slot solo cambia de objetivo); pedir la misma dos veces seguidas, no.
 static std::string g_slotReqName;
 static int g_slotReqFrame = -100000;
+static std::string g_txdWaitName;    // skin propia cuyo .txd se esta esperando (3.1.16)
+static int g_txdWaitFrame = -100000; // frame en que se empezo a esperar el .txd
 static int g_miOff = -1;                   // offset de CEntity::m_nModelIndex dentro del ped (se calibra solo)
 static unsigned g_wornModelId = 0;
 static const volatile uint8_t* g_cutPtr = nullptr;    // CCutsceneMgr::ms_running
@@ -537,6 +539,20 @@ static bool ApplySkin(int idx, bool force = false) {
                 loader::InstallHook();
                 if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
                     loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile, g_frame);
+            }
+            if (g_skins[idx].src == 1 && !loader::TxdLoaded(name.c_str())) {
+                // El .txd tiene que estar CARGADO antes de pedir el .dff (3.1.16):
+                // si el personaje se crea con el .txd sin cargar, se queda en
+                // blanco aunque el .txd cargue despues. Se pide (y se vuelve a
+                // meter en la cola) y se espera hasta ~5 s; si no carga, se
+                // aplica igual (se vera en blanco, como antes).
+                loader::RequestTxd(name.c_str());
+                if (g_txdWaitName != name) { g_txdWaitName = name; g_txdWaitFrame = g_frame; }
+                if (g_frame - g_txdWaitFrame < 300) return false;   // esperando el .txd: el watchdog vuelve a llamar
+                LOGI("el .txd de '%s' no cargo en ~5 s: se aplica la skin sin texturas", name.c_str());
+                g_txdWaitName.clear();
+            } else {
+                g_txdWaitName.clear();
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
