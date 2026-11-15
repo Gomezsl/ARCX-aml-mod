@@ -245,17 +245,17 @@ static const char* kText[3][K_COUNT] = {
      "Tamaño del botón", "Opacidad", "Desliza para ver más", "Esperando: jugador %s...", "SKINS", "AJUSTES",
      "No hay skins en modloader/", "GENERAL", "APARIENCIA", "ACERCA DE", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (PROPIO)", "ZyZ ModLoader", "ARCXLoader (propio)", "Releer modloader/", "Releer ARCXLoader/",
-     "%d skins en modloader/", "%d skins propias, %d png/jpg", "Skins propias: se listan, pero el juego aun no las aplica"},
+     "%d skins en modloader/", "%d skins propias, %d png/jpg", "Skins propias: se sirven desde el IMG de ARCXLoader"},
     {"Back to CJ", "WORN", "Remember last skin", "Lock button", "Reload skins folder", "Language", "Color",
      "Button size", "Opacity", "Swipe to see more", "Waiting: player %s...", "SKINS", "SETTINGS",
      "No skins in modloader/", "GENERAL", "APPEARANCE", "ABOUT", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (OWN)", "ZyZ ModLoader", "ARCXLoader (own)", "Reload modloader/", "Reload ARCXLoader/",
-     "%d skins in modloader/", "%d own skins, %d png/jpg", "Own skins: listed, but the game can't apply them yet"},
+     "%d skins in modloader/", "%d own skins, %d png/jpg", "Own skins: served from the ARCXLoader IMG"},
     {"Kembali jadi CJ", "DIPAKAI", "Ingat skin terakhir", "Kunci tombol", "Muat ulang folder skin", "Bahasa", "Warna",
      "Ukuran tombol", "Opasitas", "Geser untuk melihat lagi", "Menunggu: pemain %s...", "SKIN", "PENGATURAN",
      "Tidak ada skin di modloader/", "UMUM", "TAMPILAN", "TENTANG", "%d skin",
      "ZYZ MODLOADER", "ARCXLOADER (SENDIRI)", "ZyZ ModLoader", "ARCXLoader (sendiri)", "Muat ulang modloader/", "Muat ulang ARCXLoader/",
-     "%d skin di modloader/", "%d skin sendiri, %d png/jpg", "Skin sendiri: terdaftar, tapi game belum bisa memakainya"}};
+     "%d skin di modloader/", "%d skin sendiri, %d png/jpg", "Skin sendiri: disajikan dari IMG ARCXLoader"}};
 static const char* kLangName[3] = {"Español", "English", "Indonesia"};
 static const char* kThemeName[3][5] = {{"Por defecto", "Rojo", "Azul", "Verde", "Naranja"},
                                        {"Default", "Red", "Blue", "Green", "Orange"},
@@ -769,7 +769,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.3-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.4-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
