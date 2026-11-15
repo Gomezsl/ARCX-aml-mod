@@ -892,17 +892,27 @@ static void CGame_Process_hook() {
     Watchdog();
 }
 
-// Hook de RwTextureRead (3.1.22): cuando el juego carga un DFF y pide una
+// Hook de RwTextureRead (3.1.22, 3.1.29): cuando el juego carga un DFF y pide una
 // textura por nombre (es lo que hace el cargador de RenderWare para ligar
-// cada material a su textura), si el nombre es una de nuestras PNG se le
-// devuelve directamente nuestra textura, sin depender de cual sea el
-// diccionario actual en ese momento. Por eso en 3.1.21 la skin seguia en
-// blanco aunque el diccionario PNG ya estaba registrado en el CTxdStore: el
-// DFF se cargo con otro diccionario actual y sus materiales quedaron con la
-// textura en null. El contador de referencias se sube igual que hace
-// RwTextureRead (+0x64), para que el material que la recibe sea dueno de su
-// referencia. Si el nombre no es una PNG nuestra, se llama al original.
+// cada material a su textura), primero se deja que el RwTextureRead ORIGINAL
+// del juego la resuelva contra el diccionario actual (3.1.29: asi lo hace
+// ZyZ ModLoader, que registra sus texturas en el CTxdStore nativo y deja que
+// el juego las ligue; en ZyZ el tirante de Ghost sale bien, en ARCX salia
+// retorcido/gris porque el hook servia siempre desde su cache propia sin
+// probar el diccionario nativo). Si el original la encuentra, se devuelve
+// esa (es la textura correcta del diccionario del modelo). Solo si el
+// original devuelve null (el DFF se cargo con otro diccionario actual, el
+// caso de 3.1.21 que dejaba la skin en blanco) se sirve desde nuestra cache
+// de PNG/TXD por nombre. El contador de referencias se sube igual que hace
+// RwTextureRead (+0x64) solo cuando se sirve desde la cache (el original ya
+// lo sube cuando devuelve una textura). Si el nombre no es una PNG nuestra
+// y el original tampoco la tiene, se devuelve null (lo que devolvio el
+// original).
 static void* RwTextureRead_hook(const char* name, const char* mask) {
+    // 3.1.29: primero el original (diccionario nativo, como ZyZ). Si lo
+    // encuentra, esa es la textura correcta del modelo.
+    void* native = (name && *name) ? RwTextureRead_orig(name, mask) : nullptr;
+    if (native) return native;
     if (name && *name) {
         void* tex = loader::FindPngTexture(name);
         if (tex) {
@@ -923,7 +933,7 @@ static void* RwTextureRead_hook(const char* name, const char* mask) {
             LOGI("RwTextureRead: textura pedida y NO en nuestras PNG: '%s'", name);
         }
     }
-    return RwTextureRead_orig(name, mask);
+    return native;
 }
 
 // Resuelve los simbolos de libGTASA.so, pone los hooks del juego y lanza la busqueda de skins.
