@@ -76,6 +76,13 @@ static int g_applyFrame = 0;        // frame en el que se pidio
 static bool g_applyWaiting = false; // se pidio y se espera a que cargue
 static std::string g_coolName;      // skin que fallo hace poco (enfriamiento)
 static int g_coolFrame = -100000;
+// Lo ultimo que se le pidio al slot al juego: volver a pedir la MISMA skin
+// para el mismo slot mientras su carga sigue en curso se cae dentro de
+// CStreaming::RequestSpecialModel (crash real en 3.1.4: tocar 'suk', ir a CJ
+// y volver a tocar 'suk' enseguida). Pedir otra skin distinta si es seguro
+// (el slot solo cambia de objetivo); pedir la misma dos veces seguidas, no.
+static std::string g_slotReqName;
+static int g_slotReqFrame = -100000;
 static int g_miOff = -1;                   // offset de CEntity::m_nModelIndex dentro del ped (se calibra solo)
 static unsigned g_wornModelId = 0;
 static const volatile uint8_t* g_cutPtr = nullptr;    // CCutsceneMgr::ms_running
@@ -458,20 +465,34 @@ static bool ApplySkin(int idx, bool force = false) {
             LOGI("la skin '%s' fallo hace poco: espera unos segundos antes de volver a intentarlo", name.c_str());
             return true;   // hecho (rechazado): no se queda pendiente
         }
-        if (g_skins[idx].src == 1) {
-            // Skin PROPIA (ARCXLoader): se instala aqui el gancho de archivos
-            // (diagnostico) y se registra el IMG propio en el juego, para que
-            // el juego encuentre el archivo sin depender de ZyZ.
-            loader::InstallHook();
-            if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
-                loader::RegisterImg(AddImageToList);
+        if (g_slotReqName == name && g_frame - g_slotReqFrame < 600 && !force) {
+            // Esta misma skin ya se le pidio a este slot hace poco: el juego
+            // puede estar todavia cargandola y volver a pedirla se cae dentro
+            // de RequestSpecialModel (crash real en 3.1.4: tocar 'suk', ir a
+            // CJ y volver a tocar 'suk' enseguida; ir a CJ no cancela el
+            // pedido que ya tiene el juego). No se vuelve a pedir: se espera
+            // a que termine la carga que ya esta en curso.
+            LOGI("la skin '%s' ya se pidio hace poco: se espera a que cargue sin volver a pedirla", name.c_str());
+            g_applyIdx = idx;
+            g_applyFrame = g_slotReqFrame;   // el tiempo de espera se cuenta desde el pedido original
+            g_applyWaiting = true;
+        } else {
+            if (g_skins[idx].src == 1) {
+                // Skin PROPIA (ARCXLoader): se instala aqui el gancho de archivos
+                // (diagnostico) y se registra el IMG propio en el juego, para que
+                // el juego encuentre el archivo sin depender de ZyZ.
+                loader::InstallHook();
+                if (loader::ImgReady() && !loader::ImgRegistered() && AddImageToList)
+                    loader::RegisterImg(AddImageToList);
+            }
+            LOGI("aplicando '%s'...", name.c_str());
+            RequestSpecialChar(g_slot, name.c_str(), 0);
+            LoadAllRequestedModels(false);
+            g_slotReqName = name; g_slotReqFrame = g_frame;
+            g_applyIdx = idx;
+            g_applyFrame = g_frame;
+            g_applyWaiting = true;
         }
-        LOGI("aplicando '%s'...", name.c_str());
-        RequestSpecialChar(g_slot, name.c_str(), 0);
-        LoadAllRequestedModels(false);
-        g_applyIdx = idx;
-        g_applyFrame = g_frame;
-        g_applyWaiting = true;
     }
     // ---- fase 2: esperar a que cargue (sin volver a pedir ni llenar el log) ----
     if (HasSpecialCharLoaded(g_slot)) {
@@ -513,7 +534,7 @@ static bool ApplySkin(int idx, bool force = false) {
             }
             if (g_pedVtbl && *(void**)mi != g_pedVtbl && !force) {
                 LOGI("  el modelo %u (slot %d) NO es un ped (vtable %p): no se aplica", modelId, g_slot, *(void**)mi);
-                if (g_slot != 1) { g_slot = 1; LOGI("  se usa el slot 1"); g_applyWaiting = false; g_applyIdx = -2; return ApplySkin(idx, force); }
+                if (g_slot != 1) { g_slot = 1; LOGI("  se usa el slot 1"); g_slotReqName.clear(); g_slotReqFrame = -100000; g_applyWaiting = false; g_applyIdx = -2; return ApplySkin(idx, force); }
                 return true;
             }
         }
@@ -631,6 +652,7 @@ static bool ReadFlag(const volatile uint8_t* p) { return p && *p != 0; }
 // El juego recreo al jugador (partida nueva o cargada).
 static void OnNewSession() {
     g_curSkin = -1;
+    g_slotReqName.clear(); g_slotReqFrame = -100000;   // partida nueva/cargada: el juego ya no tiene ningun pedido en el slot
     g_giveUp = false; g_autoTries = 0;
     if (!g_remember) {
         g_desired = -1; g_lastName = "CJ"; g_needReapply = false;
