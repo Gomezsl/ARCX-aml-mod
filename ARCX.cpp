@@ -29,16 +29,26 @@
 #include <vector>
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
+// stb_image (dominio publico, un solo encabezado): decodifica PNG y JPG a
+// pixeles RGBA en memoria. 3.1.25 lo usa para las JPG (el juego no trae
+// lector JPEG: RtJPEGImageRead no existe). La implementacion se compila una
+// sola vez aqui (ARCX.cpp es la unica unidad de compilacion del plugin).
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO
+#define STBI_NO_SIMD
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 #include "skinscan.h"
 #include "arcx_common.h"
 #include "arcx_core.h"
 #include "arcx_loader.h"
 #include "arcx_ui.h"
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.24-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 3.1.25-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define ARCX_VERSION "3.1.24-beta"
+#define ARCX_VERSION "3.1.25-beta"
 
 static void Log(const char* fmt, ...) {
     va_list ap;

@@ -138,6 +138,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+// stb_image (3.1.25): decodifica JPG (y PNG) a pixeles RGBA. La
+// implementacion se compila en ARCX.cpp (STB_IMAGE_IMPLEMENTATION) ANTES de
+// incluir este archivo, asi que las declaraciones (stbi_load_from_memory,
+// stbi_image_free, stbi_failure_reason) ya estan visibles aqui. NO se
+// incluye "stb_image.h" aqui: incluirlo dos veces en la misma unidad
+// rompe la compilacion (stb define macros internas en la implementacion).
 #include "skinscan.h"
 #include "arcx_common.h"
 
@@ -158,8 +164,10 @@ static void Log(const char* fmt, ...) {
 // nivel superior, asi que contaba png: 0 y no cargaba ninguna textura.
 // Profundidad maxima 4. El .dff y el .txd se siguen buscando SOLO en el
 // nivel superior (un .dff en una subcarpeta no es el modelo de la skin).
+// 3.1.25: tambien recoge las .jpg/.jpeg (nombre y ruta) para cargarlas con
+// stb_image, porque el juego no trae lector JPEG.
 static void CollectImagesRecursive(const std::string& dir, std::vector<std::pair<std::string, std::string>>* pngs,
-                                   int* jpgCount, int depth) {
+                                   std::vector<std::pair<std::string, std::string>>* jpgs, int depth) {
     if (depth > 4) return;
     DIR* d = opendir(dir.c_str());
     if (!d) return;
@@ -170,7 +178,7 @@ static void CollectImagesRecursive(const std::string& dir, std::vector<std::pair
         struct stat st;
         if (stat(full.c_str(), &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            CollectImagesRecursive(full, pngs, jpgCount, depth + 1);
+            CollectImagesRecursive(full, pngs, jpgs, depth + 1);
         } else if (S_ISREG(st.st_mode)) {
             if (skinscan::EndsWith(n, ".png")) {
                 if (pngs) {
@@ -178,7 +186,11 @@ static void CollectImagesRecursive(const std::string& dir, std::vector<std::pair
                     if (!texName.empty() && texName.size() <= 32) pngs->push_back({texName, full});
                 }
             } else if (skinscan::EndsWith(n, ".jpg") || skinscan::EndsWith(n, ".jpeg")) {
-                if (jpgCount) (*jpgCount)++;
+                if (jpgs) {
+                    size_t ext = skinscan::EndsWith(n, ".jpeg") ? 5 : 4;
+                    std::string texName = n.substr(0, n.size() - ext);
+                    if (!texName.empty() && texName.size() <= 32) jpgs->push_back({texName, full});
+                }
             }
         }
     }
@@ -203,11 +215,11 @@ static void ScanPack(const std::string& packDir, const std::string& packName,
         }
     }
     closedir(d);
-    // Las PNG/JPG se cuentan en la carpeta y sus subcarpetas (3.1.24).
-    std::vector<std::pair<std::string, std::string>> pngList;
-    int jpgs = 0;
-    CollectImagesRecursive(packDir, &pngList, &jpgs, 0);
+    // Las PNG/JPG se cuentan en la carpeta y sus subcarpetas (3.1.24, 3.1.25).
+    std::vector<std::pair<std::string, std::string>> pngList, jpgList;
+    CollectImagesRecursive(packDir, &pngList, &jpgList, 0);
     int pngs = (int)pngList.size();
+    int jpgs = (int)jpgList.size();
     if (dffPath.empty()) {
         if (pngs + jpgs > 0)
             Log("  carpeta '%s': solo texturas sueltas (%d png, %d jpg), sin .dff: no es una skin", packName.c_str(), pngs, jpgs);
@@ -820,6 +832,58 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
     return tex;
 }
 
+// RwImage de RenderWare (layout estandar 3.x, el que llena RtPNGImageRead y
+// el que leen RwImageFindRasterFormat/RwRasterSetFromImage): width+0,
+// height+4, depth+8, stride+12, cpPixels+16, palette+24 (32 bytes en 64
+// bits). Se construye a mano para las imagenes decodificadas con stb_image
+// (3.1.25): el juego no trae lector JPEG, asi que las JPG se decodifican
+// aqui a RGBA y se meten por el mismo camino (FindRasterFormat ->
+// RasterCreate -> SetFromImage -> TextureCreate) que las PNG.
+struct RwImageManual {
+    int32_t width, height, depth, stride;
+    uint8_t* cpPixels;
+    void* palette;
+};
+
+// Carga una imagen (JPG o PNG) decodificandola con stb_image a RGBA y
+// creando su textura por el camino normal de RenderWare. La ruta es la
+// ABSOLUTA de la carpeta de la skin: se lee con fopen de libc, que abre la
+// ruta tal cual (el flujo de archivos de RenderWare que usa RtPNGImageRead
+// es el que antepone una base y rompe las rutas absolutas; fopen no).
+// kind es solo la etiqueta del log ("JPG" o "PNG"). Devuelve la textura o
+// null. Los pixeles decodificados se liberan tras copiarlos al raster.
+static void* LoadImageViaStb(const std::string& path, const std::string& texName, const char* kind) {
+    if (!g_rwImageFindRasterFormat || !g_rwRasterCreate || !g_rwRasterSetFromImage || !g_rwTextureCreate || !g_rwTextureSetName) return nullptr;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { Log("    %s '%s': no se pudo abrir el archivo", kind, texName.c_str()); return nullptr; }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 64L * 1024 * 1024) { fclose(f); Log("    %s '%s': tamano raro (%ld bytes)", kind, texName.c_str(), len); return nullptr; }
+    std::vector<uint8_t> buf((size_t)len);
+    if (fread(buf.data(), 1, (size_t)len, f) != (size_t)len) { fclose(f); Log("    %s '%s': no se pudo leer el archivo", kind, texName.c_str()); return nullptr; }
+    fclose(f);
+    int w = 0, h = 0, ch = 0;
+    uint8_t* px = stbi_load_from_memory(buf.data(), (int)len, &w, &h, &ch, 4);
+    if (!px) { Log("    %s '%s': stb_image no lo decodifico (%s)", kind, texName.c_str(), stbi_failure_reason()); return nullptr; }
+    if (w < 1 || h < 1 || w > 4096 || h > 4096) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), w, h); stbi_image_free(px); return nullptr; }
+    RwImageManual img;
+    img.width = w; img.height = h; img.depth = 32; img.stride = w * 4; img.cpPixels = px; img.palette = nullptr;
+    int a = 0, b = 0, c = 0, d = 0;
+    void* fmt = g_rwImageFindRasterFormat(&img, 4, &a, &b, &c, &d);
+    if (!fmt) { Log("    %s '%s': RwImageFindRasterFormat no encontro formato", kind, texName.c_str()); stbi_image_free(px); return nullptr; }
+    if (b < 1 || a < 1) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), a, b); stbi_image_free(px); return nullptr; }
+    Log("    %s '%s': raster a=%d b=%d profundidad=%d formato=%d", kind, texName.c_str(), a, b, c, d);
+    void* raster = g_rwRasterCreate(b, a, d, c);
+    if (!raster) { Log("    %s '%s': RwRasterCreate fallo", kind, texName.c_str()); stbi_image_free(px); return nullptr; }
+    if (!g_rwRasterSetFromImage(raster, &img)) { Log("    %s '%s': RwRasterSetFromImage fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); stbi_image_free(px); return nullptr; }
+    stbi_image_free(px);   // los pixeles ya estan copiados en el raster
+    void* tex = g_rwTextureCreate(raster);
+    if (!tex) { Log("    %s '%s': RwTextureCreate fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); return nullptr; }
+    g_rwTextureSetName(tex, texName.c_str());
+    return tex;
+}
+
 // Busca una textura PNG nuestra por nombre (3.1.22). La usa el hook de
 // RwTextureRead: cuando el juego carga un DFF y pide una textura por nombre,
 // si es una de nuestras PNG se le devuelve directamente, sin depender del
@@ -850,7 +914,7 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
     int done = 0;
     for (auto& s : skins) {
         if (s.src != 1) continue;
-        if (s.pngCount <= 0) continue;
+        if (s.pngCount + s.jpgCount <= 0) continue;
         std::string low = skinscan::Lower(s.name);
         auto failIt = g_pngFailFrame.find(low);
         if (failIt != g_pngFailFrame.end() && frame - failIt->second < 600) continue;   // enfriamiento tras un fallo: no se reintenta a cada frame
@@ -875,10 +939,13 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
             continue;
         }
         if (curDict) { Log("  PNG de '%s': el .txd ya tiene diccionario (hueco %d): las PNG no lo sobrescriben", s.name.c_str(), txdSlot); g_pngDicts[low] = curDict; continue; }
-        // Escanear la carpeta de la skin por .png (incluidas subcarpetas, 3.1.24)
+        // Escanear la carpeta de la skin por imagenes (PNG y JPG, incluidas
+        // subcarpetas, 3.1.24/3.1.25). Las PNG van por RtPNGImageRead; las
+        // JPG por stb_image (el juego no trae lector JPEG).
         std::vector<std::pair<std::string, std::string>> pngs;   // (nombre de textura, ruta)
-        CollectImagesRecursive(s.dir, &pngs, nullptr, 0);
-        if (pngs.empty()) continue;
+        std::vector<std::pair<std::string, std::string>> jpgs;
+        CollectImagesRecursive(s.dir, &pngs, &jpgs, 0);
+        if (pngs.empty() && jpgs.empty()) continue;
         void* dict = g_rwTexDictionaryCreate();
         if (!dict) { Log("  PNG de '%s': RwTexDictionaryCreate fallo", s.name.c_str()); continue; }
         int ok = 0;
@@ -889,12 +956,19 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
             g_pngTextures[skinscan::Lower(p.first)] = tex;   // 3.1.22: tambien en la cache por nombre, para el hook de RwTextureRead
             ok++;
         }
-        if (ok == 0) { Log("  PNG de '%s': ningun PNG cargo (se queda sin texturas): se reintentara en ~10 s", s.name.c_str()); g_pngFailFrame[low] = frame; continue; }
+        for (auto& p : jpgs) {
+            void* tex = LoadImageViaStb(p.second, p.first, "JPG");
+            if (!tex) continue;
+            if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    JPG '%s': no se pudo meter en el diccionario", p.first.c_str()); continue; }
+            g_pngTextures[skinscan::Lower(p.first)] = tex;   // la cache por nombre cubre JPG igual que PNG (el hook no distingue)
+            ok++;
+        }
+        if (ok == 0) { Log("  imagenes de '%s': ninguna cargo (se queda sin texturas): se reintentara en ~10 s", s.name.c_str()); g_pngFailFrame[low] = frame; continue; }
         *(void**)entry = dict;
         g_txdAddRef(txdSlot);
         g_pngDicts[low] = dict;
         g_pngFailFrame.erase(low);   // si antes fallo, ya no esta en enfriamiento
-        Log("  texturas PNG de '%s' CARGADAS (%d textura(s), hueco %d): la skin ya se ve con texturas", s.name.c_str(), ok, txdSlot);
+        Log("  texturas de '%s' CARGADAS (%d textura(s), hueco %d): la skin ya se ve con texturas", s.name.c_str(), ok, txdSlot);
         done++;
     }
     return done;
