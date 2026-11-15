@@ -705,6 +705,7 @@ static void* (*g_rwTexDictionaryAddTexture)(void*, void*) = nullptr;   // RwTexD
 static void (*g_rwImageDestroy)(void*) = nullptr;                      // RwImageDestroy(imagen)
 static void (*g_rwRasterDestroy)(void*) = nullptr;                     // RwRasterDestroy(raster)
 static std::map<std::string, void*> g_pngDicts;   // nombre de skin (minusculas) -> diccionario PNG ya creado (se re-registra si la sesion lo resetea)
+static std::map<std::string, void*> g_pngTextures;   // nombre de textura (minusculas) -> RwTexture* de nuestras PNG (3.1.22: el hook de RwTextureRead las devuelve cuando el DFF las pide)
 
 static void InitPng(void* rtPngImageRead, void* rwImageFindRasterFormat, void* rwRasterCreate, void* rwRasterSetFromImage, void* rwTextureCreate, void* rwTextureSetName, void* rwTexDictionaryCreate, void* rwTexDictionaryAddTexture, void* rwImageDestroy, void* rwRasterDestroy) {
     g_rtPngImageRead = (void* (*)(const char*))rtPngImageRead;
@@ -781,6 +782,16 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
     return tex;
 }
 
+// Busca una textura PNG nuestra por nombre (3.1.22). La usa el hook de
+// RwTextureRead: cuando el juego carga un DFF y pide una textura por nombre,
+// si es una de nuestras PNG se le devuelve directamente, sin depender del
+// diccionario actual. Devuelve la textura o null.
+static void* FindPngTexture(const char* name) {
+    if (!name || !*name) return nullptr;
+    auto it = g_pngTextures.find(skinscan::Lower(name));
+    return it != g_pngTextures.end() ? it->second : nullptr;
+}
+
 // Carga las texturas PNG de las skins propias (3.1.20). Para cada skin propia
 // con .png en su carpeta: si su entrada del CTxdStore ya tiene un diccionario
 // (el .txd cargo bien con LoadTxdDirect), las PNG no lo tocan: el .txd manda.
@@ -850,6 +861,7 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
             void* tex = LoadPngTexture(p.second, p.first);
             if (!tex) continue;
             if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    PNG '%s': no se pudo meter en el diccionario", p.first.c_str()); continue; }
+            g_pngTextures[skinscan::Lower(p.first)] = tex;   // 3.1.22: tambien en la cache por nombre, para el hook de RwTextureRead
             ok++;
         }
         if (ok == 0) { Log("  PNG de '%s': ningun PNG cargo (se queda sin texturas): se reintentara en ~10 s", s.name.c_str()); g_pngFailFrame[low] = frame; continue; }

@@ -51,6 +51,8 @@ static void* (*RwTexDictionaryCreate)();                  // RwTexDictionaryCrea
 static void* (*RwTexDictionaryAddTexture)(void*, void*);  // RwTexDictionaryAddTexture (opcional: mete una textura en un diccionario; 3.1.20)
 static void  (*RwImageDestroy)(void*);                    // RwImageDestroy (opcional: libera una RwImage; 3.1.20)
 static void  (*RwRasterDestroy)(void*);                   // RwRasterDestroy (opcional: libera un RwRaster; 3.1.20)
+static void* (*RwTextureRead)(const char*, const char*);  // RwTextureRead (opcional: lee una textura por nombre del diccionario actual; 3.1.22: se engancha para devolver nuestras PNG)
+static void* (*RwTextureRead_orig)(const char*, const char*); // RwTextureRead original (para llamarlo cuando el nombre no es una PNG nuestra)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
@@ -872,6 +874,28 @@ static void CGame_Process_hook() {
     Watchdog();
 }
 
+// Hook de RwTextureRead (3.1.22): cuando el juego carga un DFF y pide una
+// textura por nombre (es lo que hace el cargador de RenderWare para ligar
+// cada material a su textura), si el nombre es una de nuestras PNG se le
+// devuelve directamente nuestra textura, sin depender de cual sea el
+// diccionario actual en ese momento. Por eso en 3.1.21 la skin seguia en
+// blanco aunque el diccionario PNG ya estaba registrado en el CTxdStore: el
+// DFF se cargo con otro diccionario actual y sus materiales quedaron con la
+// textura en null. El contador de referencias se sube igual que hace
+// RwTextureRead (+0x64), para que el material que la recibe sea dueno de su
+// referencia. Si el nombre no es una PNG nuestra, se llama al original.
+static void* RwTextureRead_hook(const char* name, const char* mask) {
+    if (name && *name) {
+        void* tex = loader::FindPngTexture(name);
+        if (tex) {
+            uint32_t rc = *(uint32_t*)((char*)tex + 0x64);
+            *(uint32_t*)((char*)tex + 0x64) = rc + 1;
+            return tex;
+        }
+    }
+    return RwTextureRead_orig(name, mask);
+}
+
 // Resuelve los simbolos de libGTASA.so, pone los hooks del juego y lanza la busqueda de skins.
 inline void Init(const std::string& modloaderPath, const std::string& loaderPath) {
     g_root = modloaderPath;
@@ -919,6 +943,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(RwTexDictionaryAddTexture,         "_Z25RwTexDictionaryAddTextureP15RwTexDictionaryP9RwTexture"); // opcional: mete una textura en un diccionario (3.1.20)
     SYM(RwImageDestroy,                    "_Z14RwImageDestroyP7RwImage");           // opcional: libera una RwImage (3.1.20)
     SYM(RwRasterDestroy,                   "_Z15RwRasterDestroyP8RwRaster");         // opcional: libera un RwRaster (3.1.20)
+    SYM(RwTextureRead,                     "_Z13RwTextureReadPKcS0_");              // opcional: lee una textura por nombre del diccionario actual (3.1.22: se engancha para devolver nuestras PNG)
     // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
     // dentro de GetEntry): solo se usa su direccion para localizar el objeto
     // CDirectory y el array CStreamingInfo escaneando su codigo.
@@ -956,6 +981,10 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     }
     aml->Hook(process, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
     LOGI("hook puesto en CGame::Process");
+    if (RwTextureRead) {
+        aml->Hook((void*)RwTextureRead, (void*)RwTextureRead_hook, (void**)&RwTextureRead_orig);
+        LOGI("hook puesto en RwTextureRead (las PNG propias se ligan al cargar el DFF)");
+    } else LOGI("sin RwTextureRead: las PNG no se ligaran al cargar el DFF (la skin se vera sin texturas)");
     void* initRestart = (void*)aml->GetSym(h, "_ZN5CGame24InitialiseWhenRestartingEv");
     void* shutRestart = (void*)aml->GetSym(h, "_ZN5CGame18ShutDownForRestartEv");
     LOGI("  %s CGame::InitialiseWhenRestarting, %s CGame::ShutDownForRestart", initRestart ? "ok" : "FALTA", shutRestart ? "ok" : "FALTA");
