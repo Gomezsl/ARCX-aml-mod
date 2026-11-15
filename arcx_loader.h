@@ -105,22 +105,14 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.14: en 3.1.13 el .txd quedaba en estado 1 (pidiendo) siempre, nunca
-// llegaba a 2 (cargado). La causa: CStreaming::RequestModel NO mete los .txd
-// en la cola de peticiones. Desensamblado RequestModel (0x3949e0): para un
-// modelo de .txd (id en [20000, 24992], ver 0x394b94-0x394bac) solo pone el
-// estado a 1 y sale; la insercion en la cola doblemente enlazada (+0
-// siguiente, +2 anterior, 0x394bec-0x394c80) solo se hace para modelos
-// normales (id <= 19999). GetNextFileOnCd (0x395d7c) y RequestModelStream
-// (0x3963d0) solo sacan modelos DE ESA COLA, asi que el .txd nunca se
-// recogia. Por eso el estado se quedaba en 1 para siempre. La 3.1.14 mete el
-// modelo del .txd en la cola a mano (QueueModel), replicando la insercion
-// de RequestModel: cabeza de la cola = global 0x84adf0 (se localiza
-// escaneando RequestModel: adrp a 0x84a000 + ldr #0xdf0, unico), contador
-// de modelos pedidos = global 0x84a580 (adrp a 0x84a000 + ldr #0x580,
-// unico). Ademas se pone +4 = -1 (fin de la cadena "siguiente en el CD";
-// si quedara en 0, el streaming seguiria la cadena hasta el modelo 0) y el
-// estado a 2 (en la cola, como hace RequestModel al meter un modelo).
+// 3.1.15 (CORRECCION DEL CRASH DE 3.1.14): la cabeza de la cola es
+// *(*(0x84adf0)) (DOBLE desreferencia), no *(0x84adf0). En 3.1.14 se uso una
+// sola desreferencia, asi que se escribio el id del modelo (23025) encima de
+// los 2 bytes bajos del puntero de la cabeza y el juego se cerro al cargar
+// una partida dentro de GetNextFileOnCd (0x395e44, fault 0x0). Ahora
+// QueueModel hace la doble desreferencia y valida que la cabeza este dentro
+// del array CStreamingInfo y que los indices sean sanos antes de tocar
+// nada; si algo no cuadra, no se mete en la cola y se registra el motivo.
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -611,18 +603,31 @@ static void InitQueue(void* requestModelFn) {
 // los modelos normales (0x394bec-0x394c80). La cola es doblemente enlazada
 // con indices de modelo (int16): +0 siguiente, +2 anterior; la cabeza es un
 // centinela cuyo +0 es el primer modelo. Se pone el estado a 2 (en la cola).
+// CORRECCION 3.1.15: la cabeza es *(*(0x84adf0)) (DOBLE desreferencia: el
+// global guarda un puntero a la cabeza, y la cabeza es el CStreamingInfo
+// centinela). En 3.1.14 se uso una sola desreferencia, asi que se escribio el
+// id del modelo encima del puntero de la cabeza y el juego se cerro al cargar
+// una partida dentro de GetNextFileOnCd (fault 0x0). Ahora se valida que la
+// cabeza este dentro del array y que los indices sean sanos antes de tocar
+// nada; si algo no cuadra, no se mete en la cola y se registra el motivo.
 // Devuelve false si no se localizo la cabeza o el array.
 static bool QueueModel(int modelId) {
     if (!g_queueHeadGlobal) return false;
     void* arr = GetStreamingInfoArray();
     if (!arr) return false;
-    void* head = *(void**)g_queueHeadGlobal;
-    if (!head) return false;
+    void* headPtr = *(void**)g_queueHeadGlobal;   // puntero a la cabeza (global 0x84adf0)
+    if (!headPtr) { Log("  cola de carga: el puntero a la cabeza es nulo"); return false; }
+    void* head = *(void**)headPtr;                // la cabeza: el CStreamingInfo centinela (doble desreferencia)
+    if (!head) { Log("  cola de carga: la cabeza es nula"); return false; }
+    // La cabeza debe ser una entrada del array CStreamingInfo (su indice es
+    // (cabeza - base) / 20). Si no lo es, algo esta mal y no se toca la cola.
+    intptr_t headIdx = ((intptr_t)head - (intptr_t)arr) / 0x14;
+    if (headIdx < 0 || headIdx > 100000) { Log("  cola de carga: la cabeza %p no esta en el array (indice %d): no se mete en la cola", head, (int)headIdx); return false; }
     char* info = (char*)arr + (uintptr_t)modelId * 0x14;
-    int16_t headIdx = (int16_t)(((uintptr_t)head - (uintptr_t)arr) / 0x14);
     int16_t oldFirst = *(int16_t*)head;            // +0 del centinela: primer modelo (o -1 si vacia)
+    if (oldFirst < -1 || oldFirst > 100000) { Log("  cola de carga: el primer modelo %d no es sano: no se mete en la cola", (int)oldFirst); return false; }
     *(int16_t*)(info + 0) = oldFirst;              // el modelo apunta al primero viejo
-    *(int16_t*)(info + 2) = headIdx;               // el modelo apunta atras al centinela
+    *(int16_t*)(info + 2) = (int16_t)headIdx;      // el modelo apunta atras al centinela
     *(int16_t*)head = (int16_t)modelId;            // el centinela apunta al modelo
     if (oldFirst != -1)
         *(int16_t*)((char*)arr + (uintptr_t)(uint16_t)oldFirst * 0x14 + 2) = (int16_t)modelId;  // el primero viejo apunta atras al modelo
