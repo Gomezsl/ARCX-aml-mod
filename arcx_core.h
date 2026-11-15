@@ -540,6 +540,7 @@ static bool ApplySkin(int idx, bool force = false) {
             }
             LOGI("aplicando '%s'...", name.c_str());
             RequestSpecialChar(g_slot, name.c_str(), 0);
+            if (g_skins[idx].src == 1) loader::RequestTxd(name.c_str());   // el .txd se pide junto con el .dff (3.1.13)
             LoadAllRequestedModels(false);
             g_slotReqName = name; g_slotReqFrame = g_frame;
             g_applyIdx = idx;
@@ -554,6 +555,7 @@ static bool ApplySkin(int idx, bool force = false) {
         g_applyIdx = -2;
         g_pendingName.clear();
         LOGI("  HasSpecialCharLoaded = 1");
+        if (g_skins[idx].src == 1) loader::LogTxdStatus(name.c_str());   // diagnostico 3.1.13: ¿el .txd termino de cargar?
     } else if (g_frame - g_applyFrame > 300) {   // ~5 s sin cargar: se cancela sin crash
         g_applyWaiting = false;
         g_applyIdx = -2;

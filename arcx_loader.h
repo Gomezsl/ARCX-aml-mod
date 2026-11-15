@@ -105,18 +105,14 @@
 // sectores, +12 tamano en sectores (lo que GetCdPosnAndSize devuelve como
 // "tamano" y comprueba para saber si ya esta puesto).
 //
-// 3.1.12: registrar el .txd NO basta para que se cargue: hay que PEDIRLO al
-// sistema de streaming. RequestSpecialModel pide el .dff (RequestModel(299))
-// pero NUNCA pide el .txd (desensamblado 0x399154-0x399490: solo llama a
-// FindTxdSlot + SetTexDictionary, y CTxdStore::LoadTxd es un stub que
-// devuelve 1 sin hacer nada). Por eso en 3.1.11 el .txd quedaba registrado
-// (hueco 3025, modelo 23025) pero la skin seguia en blanco: nadie pedia el
-// modelo 23025. Ahora RegisterTxd, tras rellenar el CStreamingInfo, llama a
-// CStreaming::RequestModel(modeloTxd, 0) (el modelo del .txd es hueco +
-// 0x4E20; RequestModel lo trata como txd si cae en [20000, 24992], ver
-// 0x394b94-0x394bac), asi que el sistema de streaming lo lee del IMG y lo
-// carga. Se pide al registrar (precarga: cuando se toca la skin ya esta
-// cargado o cargando).
+// 3.1.13: en 3.1.12 el .txd se pedia solo al registrar el IMG (precarga),
+// pero la skin seguia en blanco. Ahora tambien se pide al aplicar la skin,
+// junto con el .dff, antes de LoadAllRequestedModels (misma tanda), y se
+// registra el estado del modelo del .txd en su CStreamingInfo (+0x10:
+// 0 = no pedido, 1 = pidiendo, 2 = cargado) cuando la skin ya se puso. Si el
+// estado es 2 y la skin sigue en blanco, el .txd ESTA cargado y el problema
+// es que las texturas que pide el .dff no estan en el .txd (o el .dff apunta
+// a otro nombre de .txd).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -604,6 +600,40 @@ static bool RegisterTxd(const char* name, const char* imgPath, uint32_t rawOffse
         Log("sin RequestModel: el .txd '%s' quedo registrado pero no se pidio (puede verse sin texturas)", name);
     }
     return true;
+}
+
+// Pide el modelo del .txd de una skin al streaming (3.1.13). Se llama al
+// aplicar la skin, justo despues de RequestSpecialChar y antes de
+// LoadAllRequestedModels, para que el .txd se cargue en el mismo lote que el
+// .dff. En 3.1.12 el .txd solo se pedia al registrar el IMG (precarga), pero
+// la skin seguia en blanco: pedirlo tambien al aplicar cubre el caso de que
+// la precarga no lo cargara o se descargara. Devuelve el modelo del .txd o
+// -1 si no esta registrado o falta RequestModel.
+static int RequestTxd(const char* name) {
+    if (!g_txdFindSlot || !g_requestModel) return -1;
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) { Log("  txd de '%s': no esta registrado (FindTxdSlot = -1)", name); return -1; }
+    int modelId = txdSlot + 0x4e20;
+    g_requestModel(modelId, 0);
+    Log("  txd de '%s' pedido al aplicar (modelo %d)", name, modelId);
+    return modelId;
+}
+
+// Diagnostico (3.1.13): estado del modelo del .txd en su CStreamingInfo
+// (byte +0x10: 0 = no pedido, 1 = pidiendo/cargando, 2 = cargado). Se llama
+// cuando la skin ya se puso: si es 2, el .txd ESTA cargado y el problema es
+// otro (las texturas del .txd no coinciden con las que pide el .dff); si es
+// 0 o 1, el .txd no termino de cargar.
+static void LogTxdStatus(const char* name) {
+    if (!g_txdFindSlot) { Log("  txd de '%s': sin FindTxdSlot", name); return; }
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) { Log("  txd de '%s': no registrado", name); return; }
+    int modelId = txdSlot + 0x4e20;
+    void* arr = GetStreamingInfoArray();
+    if (!arr) { Log("  txd de '%s': sin array CStreamingInfo", name); return; }
+    const uint8_t* info = (const uint8_t*)arr + (uintptr_t)modelId * 0x14;
+    Log("  txd de '%s': hueco %d, modelo %d, estado = %d (0=no pedido, 1=pidiendo, 2=cargado), imagen %d, offset %u, tamano %u",
+        name, txdSlot, modelId, info[0x10], info[7], *(const uint32_t*)(info + 8), *(const uint32_t*)(info + 12));
 }
 
 // Mete el directorio del IMG propio en el CDirectory del juego, entrada por
