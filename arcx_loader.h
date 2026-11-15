@@ -689,6 +689,11 @@ static bool TxdDictLoaded(const char* name) {
     return *(void**)entry != nullptr;
 }
 
+// Declaracion adelantada (3.1.26): el decodificador de .txd por software
+// esta definido mas abajo (tras las texturas de imagen), pero LoadTxdDirect
+// lo usa como respaldo cuando el StreamRead del juego falla (DXT de PC).
+static int LoadTxdViaSoftware(const char* name, const uint8_t* data, size_t dataSize);
+
 // Carga el .txd de una skin DIRECTO desde sus datos en memoria (3.1.19):
 // crea un flujo de RenderWare desde la memoria, lee el diccionario de
 // texturas con RwTexDictionaryStreamRead, lo guarda en la entrada del
@@ -711,7 +716,16 @@ static bool LoadTxdDirect(const char* name, void* data, size_t dataSize) {
     if (!stream) { Log("  RwStreamOpen no pudo abrir el .txd '%s' desde memoria", name); return false; }
     void* dict = g_rwTexDictionaryStreamRead(stream);
     g_rwStreamClose(stream, nullptr);
-    if (!dict) { Log("  RwTexDictionaryStreamRead no pudo leer el .txd '%s' (puede estar en formato DXT de PC, no compatible con Android)", name); return false; }
+    if (!dict) {
+        // 3.1.26: el StreamRead fallo (casi siempre porque el .txd es DXT1/
+        // DXT3/DXT5 de PC y la GPU Mali no lo decodifica). En vez de dejar
+        // la skin blanca, ARCX decodifica el .txd EL MISMO a RGBA
+        // (LoadTxdViaSoftware, definido mas abajo) y carga sus texturas
+        // por el camino normal de RenderWare.
+        Log("  RwTexDictionaryStreamRead no pudo leer el .txd '%s' (puede estar en formato DXT de PC, no compatible con Android): se decodifica por software", name);
+        int n = LoadTxdViaSoftware(name, (const uint8_t*)data, dataSize);
+        return n > 0;
+    }
     *(void**)entry = dict;   // la entrada del CTxdStore apunta al diccionario
     g_txdAddRef(txdSlot);    // que el juego no lo descargue en medio de la partida
     g_txdBuffers.push_back(data);   // el buffer se queda: el diccionario puede referenciarlo
@@ -845,6 +859,31 @@ struct RwImageManual {
     void* palette;
 };
 
+// Crea una textura de RenderWare a partir de pixeles RGBA en memoria
+// (3.1.25/3.1.26). Es el paso comun de las JPG (stb_image) y del .txd
+// decodificado por software: RwImage manual -> FindRasterFormat ->
+// RasterCreate -> SetFromImage -> TextureCreate -> SetName. Devuelve la
+// textura o null. Los pixeles se copian al raster, asi que el llamador
+// puede liberarlos despues.
+static void* CreateTextureFromRgba(int w, int h, const uint8_t* px, const std::string& texName, const char* kind) {
+    if (!g_rwImageFindRasterFormat || !g_rwRasterCreate || !g_rwRasterSetFromImage || !g_rwTextureCreate || !g_rwTextureSetName) return nullptr;
+    if (w < 1 || h < 1 || w > 4096 || h > 4096 || !px) return nullptr;
+    RwImageManual img;
+    img.width = w; img.height = h; img.depth = 32; img.stride = w * 4; img.cpPixels = const_cast<uint8_t*>(px); img.palette = nullptr;
+    int a = 0, b = 0, c = 0, d = 0;
+    void* fmt = g_rwImageFindRasterFormat(&img, 4, &a, &b, &c, &d);
+    if (!fmt) { Log("    %s '%s': RwImageFindRasterFormat no encontro formato", kind, texName.c_str()); return nullptr; }
+    if (b < 1 || a < 1) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), a, b); return nullptr; }
+    Log("    %s '%s': raster a=%d b=%d profundidad=%d formato=%d", kind, texName.c_str(), a, b, c, d);
+    void* raster = g_rwRasterCreate(b, a, d, c);
+    if (!raster) { Log("    %s '%s': RwRasterCreate fallo", kind, texName.c_str()); return nullptr; }
+    if (!g_rwRasterSetFromImage(raster, &img)) { Log("    %s '%s': RwRasterSetFromImage fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); return nullptr; }
+    void* tex = g_rwTextureCreate(raster);
+    if (!tex) { Log("    %s '%s': RwTextureCreate fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); return nullptr; }
+    g_rwTextureSetName(tex, texName.c_str());
+    return tex;
+}
+
 // Carga una imagen (JPG o PNG) decodificandola con stb_image a RGBA y
 // creando su textura por el camino normal de RenderWare. La ruta es la
 // ABSOLUTA de la carpeta de la skin: se lee con fopen de libc, que abre la
@@ -867,21 +906,251 @@ static void* LoadImageViaStb(const std::string& path, const std::string& texName
     uint8_t* px = stbi_load_from_memory(buf.data(), (int)len, &w, &h, &ch, 4);
     if (!px) { Log("    %s '%s': stb_image no lo decodifico (%s)", kind, texName.c_str(), stbi_failure_reason()); return nullptr; }
     if (w < 1 || h < 1 || w > 4096 || h > 4096) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), w, h); stbi_image_free(px); return nullptr; }
-    RwImageManual img;
-    img.width = w; img.height = h; img.depth = 32; img.stride = w * 4; img.cpPixels = px; img.palette = nullptr;
-    int a = 0, b = 0, c = 0, d = 0;
-    void* fmt = g_rwImageFindRasterFormat(&img, 4, &a, &b, &c, &d);
-    if (!fmt) { Log("    %s '%s': RwImageFindRasterFormat no encontro formato", kind, texName.c_str()); stbi_image_free(px); return nullptr; }
-    if (b < 1 || a < 1) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), a, b); stbi_image_free(px); return nullptr; }
-    Log("    %s '%s': raster a=%d b=%d profundidad=%d formato=%d", kind, texName.c_str(), a, b, c, d);
-    void* raster = g_rwRasterCreate(b, a, d, c);
-    if (!raster) { Log("    %s '%s': RwRasterCreate fallo", kind, texName.c_str()); stbi_image_free(px); return nullptr; }
-    if (!g_rwRasterSetFromImage(raster, &img)) { Log("    %s '%s': RwRasterSetFromImage fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); stbi_image_free(px); return nullptr; }
+    void* tex = CreateTextureFromRgba(w, h, px, texName, kind);
     stbi_image_free(px);   // los pixeles ya estan copiados en el raster
-    void* tex = g_rwTextureCreate(raster);
-    if (!tex) { Log("    %s '%s': RwTextureCreate fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); return nullptr; }
-    g_rwTextureSetName(tex, texName.c_str());
     return tex;
+}
+
+// ---- Decodificador de .txd por software (3.1.26) ----
+// El juego no lee los .txd DXT1/DXT3/DXT5 en este telefono (la GPU Mali no
+// decodifica S3TC: RwTexDictionaryStreamRead devuelve null, como paso con
+// suk.txd y trut.txd). En vez de depender de la GPU, ARCX decodifica el
+// .txd EL MISMO a RGBA y crea las texturas por el camino normal de
+// RenderWare (CreateTextureFromRgba). Asi lee .txd de todo tipo: DXT1,
+// DXT3, DXT5, sin comprimir (8888, 565, 1555, 4444) y paletizados (8/4
+// bits). Layout del TextureNative (verificado en suk.txd, plataforma 9):
+//   +0  platformId (4) | +4 filtro/direccion (4) | +8 nombre[32] |
+//   +40 mascara[32] | +72 rasterFormat (4) | +76 FourCC (4: 'DXT1'..) |
+//   +80 ancho (2) alto (2) | +84 profundidad (1) mips (1) tipo (1)
+//   compresion (1) | +88 tamano de los datos (4) | +92 datos.
+// Solo se decodifica el nivel 0 (sin mipmaps); los demas se ignoran.
+static inline uint16_t TxdRd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static inline uint32_t TxdRd32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+// Expande un color 565 a RGB de 8 bits (alpha 255).
+static inline void Txd565ToRgb(uint16_t c, uint8_t* out) {
+    uint8_t r = (uint8_t)((c >> 11) & 31), g = (uint8_t)((c >> 5) & 63), b = (uint8_t)(c & 31);
+    out[0] = (uint8_t)((r << 3) | (r >> 2));
+    out[1] = (uint8_t)((g << 2) | (g >> 4));
+    out[2] = (uint8_t)((b << 3) | (b >> 2));
+    out[3] = 255;
+}
+// Decodifica un bloque DXT1 (8 bytes) en un rectangulo 4x4 del RGBA.
+static void TxdDecodeDxt1Block(const uint8_t* blk, uint8_t* img, int stride, int bx, int by, int w, int h) {
+    uint16_t c0 = TxdRd16(blk), c1 = TxdRd16(blk + 2);
+    uint32_t idx = TxdRd32(blk + 4);
+    uint8_t col[4][4];
+    Txd565ToRgb(c0, col[0]);
+    Txd565ToRgb(c1, col[1]);
+    if (c0 > c1) {
+        for (int k = 0; k < 3; k++) {
+            col[2][k] = (uint8_t)((2 * col[0][k] + col[1][k]) / 3);
+            col[3][k] = (uint8_t)((col[0][k] + 2 * col[1][k]) / 3);
+        }
+        col[2][3] = col[3][3] = 255;
+    } else {
+        for (int k = 0; k < 3; k++) col[2][k] = (uint8_t)((col[0][k] + col[1][k]) / 2);
+        col[2][3] = 255;
+        col[3][0] = col[3][1] = col[3][2] = col[3][3] = 0;   // transparente
+    }
+    for (int py = 0; py < 4; py++) {
+        for (int px = 0; px < 4; px++) {
+            int x = bx + px, y = by + py;
+            if (x >= w || y >= h) continue;
+            int sel = (idx >> (2 * (4 * py + px))) & 3;
+            uint8_t* dst = img + (size_t)y * stride + (size_t)x * 4;
+            dst[0] = col[sel][0]; dst[1] = col[sel][1]; dst[2] = col[sel][2]; dst[3] = col[sel][3];
+        }
+    }
+}
+// Decodifica un bloque DXT3 (16 bytes): 8 de alfa explicito + 8 de color DXT1.
+static void TxdDecodeDxt3Block(const uint8_t* blk, uint8_t* img, int stride, int bx, int by, int w, int h) {
+    TxdDecodeDxt1Block(blk + 8, img, stride, bx, by, w, h);
+    for (int py = 0; py < 4; py++) {
+        for (int px = 0; px < 4; px++) {
+            int x = bx + px, y = by + py;
+            if (x >= w || y >= h) continue;
+            int bit = 4 * (4 * py + px);
+            int byteIdx = bit / 8, nib = (bit % 8) / 4;
+            uint8_t a4 = (uint8_t)((blk[byteIdx] >> (nib * 4)) & 0xF);
+            img[(size_t)y * stride + (size_t)x * 4 + 3] = (uint8_t)(a4 * 17);
+        }
+    }
+}
+// Decodifica un bloque DXT5 (16 bytes): alfa interpolado + color DXT1.
+static void TxdDecodeDxt5Block(const uint8_t* blk, uint8_t* img, int stride, int bx, int by, int w, int h) {
+    TxdDecodeDxt1Block(blk + 8, img, stride, bx, by, w, h);
+    uint8_t a0 = blk[0], a1 = blk[1];
+    uint8_t alpha[8];
+    alpha[0] = a0; alpha[1] = a1;
+    if (a0 > a1) {
+        for (int i = 0; i < 6; i++) alpha[2 + i] = (uint8_t)(((6 - i) * a0 + (i + 1) * a1) / 7);
+    } else {
+        for (int i = 0; i < 4; i++) alpha[2 + i] = (uint8_t)(((4 - i) * a0 + (i + 1) * a1) / 5);
+        alpha[6] = 0; alpha[7] = 255;
+    }
+    uint64_t aidx = 0;
+    for (int i = 0; i < 6; i++) aidx |= (uint64_t)blk[2 + i] << (8 * i);
+    for (int py = 0; py < 4; py++) {
+        for (int px = 0; px < 4; px++) {
+            int x = bx + px, y = by + py;
+            if (x >= w || y >= h) continue;
+            int sel = (int)((aidx >> (3 * (4 * py + px))) & 7);
+            img[(size_t)y * stride + (size_t)x * 4 + 3] = alpha[sel];
+        }
+    }
+}
+// Decodifica UNA textura de un .txd (TextureNative) a RGBA. data apunta al
+// inicio del Struct de la textura (los 88 bytes de cabecera), dataLen es lo
+// que queda del .txd desde ahi. Devuelve true y deja el RGBA en out.
+static bool TxdDecodeTexture(const uint8_t* data, size_t dataLen, const std::string& texName, std::vector<uint8_t>& out, int& w, int& h) {
+    if (dataLen < 92) return false;
+    uint32_t rasterFmt = TxdRd32(data + 72);
+    char fourcc[5] = { (char)data[76], (char)data[77], (char)data[78], (char)data[79], 0 };
+    w = (int)TxdRd16(data + 80);
+    h = (int)TxdRd16(data + 82);
+    uint8_t depth = data[84];
+    if (w < 1 || h < 1 || w > 4096 || h > 4096) { Log("    TXD '%s': dimensiones invalidas (%d x %d)", texName.c_str(), w, h); return false; }
+    uint32_t dataSize = TxdRd32(data + 88);
+    const uint8_t* px = data + 92;
+    size_t pxAvail = dataLen - 92;
+    if (dataSize > pxAvail) dataSize = (uint32_t)pxAvail;
+    out.assign((size_t)w * h * 4, 0);
+    int stride = w * 4;
+    bool isDxt1 = (fourcc[0] == 'D' && fourcc[1] == 'X' && fourcc[2] == 'T' && fourcc[3] == '1');
+    bool isDxt3 = (fourcc[0] == 'D' && fourcc[1] == 'X' && fourcc[2] == 'T' && fourcc[3] == '3');
+    bool isDxt5 = (fourcc[0] == 'D' && fourcc[1] == 'X' && fourcc[2] == 'T' && fourcc[3] == '5');
+    if (isDxt1 || isDxt3 || isDxt5) {
+        int blockBytes = isDxt1 ? 8 : 16;
+        int bw = (w + 3) / 4, bh = (h + 3) / 4;
+        if ((size_t)bw * bh * blockBytes > dataSize) { Log("    TXD '%s': datos %s cortos (%u bytes, faltan %d)", texName.c_str(), fourcc, dataSize, (int)((size_t)bw * bh * blockBytes - dataSize)); return false; }
+        for (int by = 0; by < bh; by++) {
+            for (int bx = 0; bx < bw; bx++) {
+                const uint8_t* blk = px + ((size_t)by * bw + bx) * blockBytes;
+                if (isDxt1) TxdDecodeDxt1Block(blk, out.data(), stride, bx * 4, by * 4, w, h);
+                else if (isDxt3) TxdDecodeDxt3Block(blk, out.data(), stride, bx * 4, by * 4, w, h);
+                else TxdDecodeDxt5Block(blk, out.data(), stride, bx * 4, by * 4, w, h);
+            }
+        }
+        return true;
+    }
+    if (depth == 32) {   // 8888 (BGRA en RenderWare)
+        if (dataSize < (size_t)w * h * 4) { Log("    TXD '%s': datos 8888 cortos", texName.c_str()); return false; }
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            out[i * 4 + 0] = px[i * 4 + 2];   // R
+            out[i * 4 + 1] = px[i * 4 + 1];   // G
+            out[i * 4 + 2] = px[i * 4 + 0];   // B
+            out[i * 4 + 3] = px[i * 4 + 3];   // A
+        }
+        return true;
+    }
+    if (depth == 16) {   // 565 / 1555 / 4444 segun rasterFormat
+        if (dataSize < (size_t)w * h * 2) { Log("    TXD '%s': datos 16 bits cortos", texName.c_str()); return false; }
+        uint32_t fmt = rasterFmt & 0x0F00;
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint16_t c = TxdRd16(px + i * 2);
+            uint8_t* dst = &out[i * 4];
+            if (fmt == 0x0100) {        // 1555
+                dst[3] = (c & 0x8000) ? 255 : 0;
+                uint8_t r = (c >> 10) & 31, g = (c >> 5) & 31, b = c & 31;
+                dst[0] = (r << 3) | (r >> 2); dst[1] = (g << 3) | (g >> 2); dst[2] = (b << 3) | (b >> 2);
+            } else if (fmt == 0x0300) { // 4444
+                uint8_t a = (c >> 12) & 15, r = (c >> 8) & 15, g = (c >> 4) & 15, b = c & 15;
+                dst[0] = r * 17; dst[1] = g * 17; dst[2] = b * 17; dst[3] = a * 17;
+            } else {                    // 565 (por defecto)
+                Txd565ToRgb(c, dst);
+            }
+        }
+        return true;
+    }
+    if (depth == 8 || depth == 4) {   // paletizado: paleta RGBA y luego indices
+        int nColors = (depth == 8) ? 256 : 16;
+        size_t palBytes = (size_t)nColors * 4;
+        if (dataSize < palBytes + (size_t)w * h * (depth == 8 ? 1 : 1)) { Log("    TXD '%s': datos paletizados cortos", texName.c_str()); return false; }
+        const uint8_t* pal = px;
+        const uint8_t* idx = px + palBytes;
+        if (depth == 8) {
+            for (size_t i = 0; i < (size_t)w * h; i++) {
+                uint8_t pi = idx[i];
+                if (pi >= nColors) pi = 0;
+                out[i * 4 + 0] = pal[pi * 4 + 2];   // R (paleta BGRA)
+                out[i * 4 + 1] = pal[pi * 4 + 1];   // G
+                out[i * 4 + 2] = pal[pi * 4 + 0];   // B
+                out[i * 4 + 3] = pal[pi * 4 + 3];   // A
+            }
+        } else {
+            for (size_t i = 0; i < (size_t)w * h; i++) {
+                uint8_t pi = (uint8_t)((idx[i / 2] >> ((i % 2) ? 0 : 4)) & 0xF);
+                out[i * 4 + 0] = pal[pi * 4 + 2];
+                out[i * 4 + 1] = pal[pi * 4 + 1];
+                out[i * 4 + 2] = pal[pi * 4 + 0];
+                out[i * 4 + 3] = pal[pi * 4 + 3];
+            }
+        }
+        return true;
+    }
+    Log("    TXD '%s': formato no soportado (FourCC '%s', rasterFormat 0x%08X, profundidad %d)", texName.c_str(), fourcc, rasterFmt, (int)depth);
+    return false;
+}
+
+// Carga un .txd COMPLETO por software (3.1.26): lo parsea (TexDictionary ->
+// TextureNative), decodifica cada textura a RGBA y crea sus texturas de
+// RenderWare. Las texturas van a un diccionario nuevo (registrado en el
+// CTxdStore bajo el nombre de la skin, como las PNG) Y a la cache por
+// nombre, asi que el hook de RwTextureRead las sirve al cargar el DFF.
+// Devuelve cuantas texturas cargo (0 si nada).
+static int LoadTxdViaSoftware(const char* name, const uint8_t* data, size_t dataSize) {
+    if (!data || dataSize < 12 + 12 + 4) return 0;
+    if (!g_rwTexDictionaryCreate || !g_rwTexDictionaryAddTexture || !g_txdFindSlot || !g_txdAddSlot || !g_txdAddRef) return 0;
+    if (TxdRd32(data) != 0x16) { Log("  TXD '%s': no es un TexDictionary (tipo 0x%08X)", name, TxdRd32(data)); return 0; }
+    size_t off = 12;   // tras el chunk raiz
+    if (off + 12 > dataSize || TxdRd32(data + off) != 0x1) { Log("  TXD '%s': sin struct de diccionario", name); return 0; }
+    uint32_t structSize = TxdRd32(data + off + 4);
+    if (off + 12 + structSize > dataSize) return 0;
+    int nTex = (structSize >= 2) ? (int)TxdRd16(data + off + 12) : 0;
+    off += 12 + structSize;
+    if (nTex <= 0 || nTex > 4096) { Log("  TXD '%s': numero de texturas raro (%d)", name, nTex); return 0; }
+    void* dict = g_rwTexDictionaryCreate();
+    if (!dict) { Log("  TXD '%s': RwTexDictionaryCreate fallo", name); return 0; }
+    int ok = 0;
+    for (int i = 0; i < nTex; i++) {
+        if (off + 12 > dataSize) break;
+        if (TxdRd32(data + off) != 0x15) { Log("  TXD '%s': textura %d no es TextureNative (tipo 0x%08X), se corta", name, i, TxdRd32(data + off)); break; }
+        uint32_t chunkSize = TxdRd32(data + off + 4);
+        if (off + 12 + chunkSize > dataSize) break;
+        // Struct dentro del TextureNative
+        size_t sp = off + 12;
+        if (sp + 12 > dataSize || TxdRd32(data + sp) != 0x1) break;
+        uint32_t sSize = TxdRd32(data + sp + 4);
+        if (sp + 12 + sSize > dataSize) break;
+        const uint8_t* texData = data + sp + 12;
+        size_t texLen = sSize;
+        char tname[33] = {0};
+        memcpy(tname, texData + 8, 32);
+        tname[32] = 0;
+        std::string texName = tname;
+        if (texName.empty()) texName = "txdtex";
+        std::vector<uint8_t> rgba;
+        int w = 0, h = 0;
+        if (!TxdDecodeTexture(texData, texLen, texName, rgba, w, h)) { off += 12 + chunkSize; continue; }
+        void* tex = CreateTextureFromRgba(w, h, rgba.data(), texName, "TXD");
+        if (!tex) { off += 12 + chunkSize; continue; }
+        if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    TXD '%s': no se pudo meter en el diccionario", texName.c_str()); off += 12 + chunkSize; continue; }
+        g_pngTextures[skinscan::Lower(texName)] = tex;   // la cache por nombre cubre el .txd igual que las PNG/JPG
+        ok++;
+        off += 12 + chunkSize;
+    }
+    if (ok == 0) { Log("  TXD '%s': ninguna textura se pudo decodificar por software", name); return 0; }
+    // Registrar el diccionario en el CTxdStore bajo el nombre de la skin.
+    int txdSlot = g_txdFindSlot(name);
+    if (txdSlot < 0) txdSlot = g_txdAddSlot(name, nullptr, false);
+    if (txdSlot < 0) { Log("  TXD '%s': no se pudo registrar el hueco", name); return ok; }
+    void* entries = GetTxdEntriesBase();
+    if (entries) {
+        void* entry = (char*)entries + (uintptr_t)txdSlot * 0x40;
+        if (!*(void**)entry) { *(void**)entry = dict; g_txdAddRef(txdSlot); }
+    }
+    Log("  TXD '%s' decodificado por software: %d textura(s) cargadas (hueco %d)", name, ok, txdSlot);
+    return ok;
 }
 
 // Busca una textura PNG nuestra por nombre (3.1.22). La usa el hook de
