@@ -117,9 +117,11 @@
 // pasar por la cola de streaming del juego (que dejaba el .txd en estado 1
 // para siempre). Por eso RegisterTxd ya no pide el .txd al streaming ni lo
 // mete en la cola.
-// Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
-// convierten a texturas: para que la skin se vea con texturas necesita su
-// .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
+// 3.1.20: las texturas .png SI se convierten a texturas de RenderWare y se
+// cargan directo (LoadPngForSkins, como CustomCharacter): ya no hace falta
+// ningun .txd para que la skin se vea con texturas. Los .jpg se inventarian
+// y se muestran en el log, pero NO se cargan (RtJPEGImageRead no existe en
+// este libGTASA.so).
 #pragma once
 #include <cstdio>
 #include <cstdarg>
@@ -671,6 +673,155 @@ static bool LoadTxdDirect(const char* name, void* data, size_t dataSize) {
     g_txdBuffers.push_back(data);   // el buffer se queda: el diccionario puede referenciarlo
     Log("  txd de '%s' CARGADO directo (hueco %d, diccionario %p): sus texturas ya estan en el juego", name, txdSlot, dict);
     return true;
+}
+
+// ---- Texturas PNG directas (3.1.20, como CustomCharacter) ----
+// En vez de depender del .txd (que el juego no lee si es DXT1, y que ni en
+// sin comprimir quiso leer con RwTexDictionaryStreamRead: la v1 y la v2 del
+// .txd convertido devolvieron null en 3.1.19), las texturas .png de la
+// carpeta de la skin se cargan DIRECTO como texturas de RenderWare, sin
+// pasar por ningun .txd ni por el streaming del juego. Es lo que hace
+// CustomCharacter (el plugin de otro modder que Daniel paso, verificado
+// desensamblando libCustomCharacter64.so): RtPNGImageRead lee el PNG a una
+// RwImage, se busca su formato de raster, se crea un RwRaster y se copia la
+// imagen, se crea un RwTexture con ese raster y se le pone el nombre de la
+// textura (el nombre del PNG sin extension, que debe coincidir con el nombre
+// de textura que pide el .dff: p. ej. "0400face.png" para la textura
+// "0400face"). Todas las texturas de la skin van a un RwTexDictionary nuevo,
+// que se registra en el CTxdStore bajo el nombre de la skin (FindTxdSlot /
+// AddTxdSlot + entrada +0 = el diccionario + AddRef). Cuando el juego aplica
+// la skin, usa ese diccionario para sus texturas. Si la entrada ya tenia un
+// diccionario (el .txd cargo bien con LoadTxdDirect), las PNG no lo
+// sobrescriben: el .txd manda. Los .jpg NO se cargan: RtJPEGImageRead no
+// existe en este libGTASA.so (solo esta RtPNGImageRead).
+static void* (*g_rtPngImageRead)(const char*) = nullptr;              // RtPNGImageRead(ruta) -> RwImage* o null
+static void* (*g_rwImageFindRasterFormat)(void*, int, int*, int*, int*, int*) = nullptr; // RwImageFindRasterFormat(imagen, tipo, &a, &b, &c, &d) -> formato o null
+static void* (*g_rwRasterCreate)(int, int, int, int) = nullptr;       // RwRasterCreate(a, b, c, d) -> RwRaster* o null
+static void* (*g_rwRasterSetFromImage)(void*, void*) = nullptr;        // RwRasterSetFromImage(raster, imagen) -> raster o null
+static void* (*g_rwTextureCreate)(void*) = nullptr;                    // RwTextureCreate(raster) -> RwTexture* o null
+static void (*g_rwTextureSetName)(void*, const char*) = nullptr;       // RwTextureSetName(textura, nombre)
+static void* (*g_rwTexDictionaryCreate)() = nullptr;                   // RwTexDictionaryCreate() -> diccionario o null
+static void* (*g_rwTexDictionaryAddTexture)(void*, void*) = nullptr;   // RwTexDictionaryAddTexture(diccionario, textura) -> textura o null
+static void (*g_rwImageDestroy)(void*) = nullptr;                      // RwImageDestroy(imagen)
+static void (*g_rwRasterDestroy)(void*) = nullptr;                     // RwRasterDestroy(raster)
+static std::map<std::string, void*> g_pngDicts;   // nombre de skin (minusculas) -> diccionario PNG ya creado (se re-registra si la sesion lo resetea)
+
+static void InitPng(void* rtPngImageRead, void* rwImageFindRasterFormat, void* rwRasterCreate, void* rwRasterSetFromImage, void* rwTextureCreate, void* rwTextureSetName, void* rwTexDictionaryCreate, void* rwTexDictionaryAddTexture, void* rwImageDestroy, void* rwRasterDestroy) {
+    g_rtPngImageRead = (void* (*)(const char*))rtPngImageRead;
+    g_rwImageFindRasterFormat = (void* (*)(void*, int, int*, int*, int*, int*))rwImageFindRasterFormat;
+    g_rwRasterCreate = (void* (*)(int, int, int, int))rwRasterCreate;
+    g_rwRasterSetFromImage = (void* (*)(void*, void*))rwRasterSetFromImage;
+    g_rwTextureCreate = (void* (*)(void*))rwTextureCreate;
+    g_rwTextureSetName = (void (*)(void*, const char*))rwTextureSetName;
+    g_rwTexDictionaryCreate = (void* (*)())rwTexDictionaryCreate;
+    g_rwTexDictionaryAddTexture = (void* (*)(void*, void*))rwTexDictionaryAddTexture;
+    g_rwImageDestroy = (void (*)(void*))rwImageDestroy;
+    g_rwRasterDestroy = (void (*)(void*))rwRasterDestroy;
+    if (g_rtPngImageRead && g_rwTexDictionaryCreate)
+        Log("carga directa de texturas PNG lista (RtPNGImageRead + RwTexDictionaryCreate)");
+    else
+        Log("sin RtPNGImageRead o RwTexDictionaryCreate: las texturas PNG no se cargaran (las skins se veran sin texturas si su .txd no carga)");
+}
+
+// Carga un PNG como textura de RenderWare (3.1.20), siguiendo el flujo de
+// CustomCharacter (verificado desensamblando libCustomCharacter64.so):
+// RtPNGImageRead -> RwImageFindRasterFormat(imagen, 4, &a, &b, &c, &d) ->
+// RwRasterCreate(b, a, d, c) -> RwRasterSetFromImage(raster, imagen) ->
+// RwTextureCreate(raster) -> RwTextureSetName(textura, nombre). Devuelve la
+// textura o null. La imagen se destruye tras copiarla al raster; el raster
+// se queda (la textura lo usa, no se destruye).
+static void* LoadPngTexture(const std::string& path, const std::string& texName) {
+    if (!g_rtPngImageRead || !g_rwImageFindRasterFormat || !g_rwRasterCreate || !g_rwRasterSetFromImage || !g_rwTextureCreate || !g_rwTextureSetName) return nullptr;
+    void* image = g_rtPngImageRead(path.c_str());
+    if (!image) { Log("    PNG '%s': RtPNGImageRead no pudo leerlo", path.c_str()); return nullptr; }
+    int a = 0, b = 0, c = 0, d = 0;
+    void* fmt = g_rwImageFindRasterFormat(image, 4, &a, &b, &c, &d);
+    if (!fmt) { Log("    PNG '%s': RwImageFindRasterFormat no encontro formato", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    if (b < 1 || a < 1) { Log("    PNG '%s': dimensiones invalidas (%d x %d)", path.c_str(), a, b); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    void* raster = g_rwRasterCreate(b, a, d, c);
+    if (!raster) { Log("    PNG '%s': RwRasterCreate fallo", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    if (!g_rwRasterSetFromImage(raster, image)) { Log("    PNG '%s': RwRasterSetFromImage fallo", path.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    void* tex = g_rwTextureCreate(raster);
+    if (!tex) { Log("    PNG '%s': RwTextureCreate fallo", path.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
+    g_rwTextureSetName(tex, texName.c_str());
+    if (g_rwImageDestroy) g_rwImageDestroy(image);
+    return tex;
+}
+
+// Carga las texturas PNG de las skins propias (3.1.20). Para cada skin propia
+// con .png en su carpeta: si su entrada del CTxdStore ya tiene un diccionario
+// (el .txd cargo bien con LoadTxdDirect), las PNG no lo tocan: el .txd manda.
+// Si no tiene diccionario (el .txd fallo o la skin no tiene .txd), se crea un
+// diccionario nuevo con todas sus PNG (nombre = el archivo sin extension) y
+// se registra en el CTxdStore bajo el nombre de la skin (FindTxdSlot /
+// AddTxdSlot + entrada +0 = el diccionario + AddRef). El diccionario creado
+// se guarda en g_pngDicts: si al cargar una partida nueva la entrada se
+// resetea a null, se vuelve a registrar el mismo diccionario (sin recargar
+// los PNG). Se llama desde el watchdog del core cuando el IMG ya esta
+// registrado. Devuelve cuantas skins cargaron o re-registraron sus PNG en
+// esta llamada.
+static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins) {
+    if (!g_rtPngImageRead || !g_rwTexDictionaryCreate || !g_rwTexDictionaryAddTexture || !g_txdFindSlot || !g_txdAddSlot || !g_txdAddRef) return 0;
+    int done = 0;
+    for (auto& s : skins) {
+        if (s.src != 1) continue;
+        if (s.pngCount <= 0) continue;
+        std::string low = skinscan::Lower(s.name);
+        int txdSlot = g_txdFindSlot(s.name.c_str());
+        if (txdSlot < 0) {
+            const char* p = !g_resolvedPath.empty() ? g_resolvedPath.c_str() : g_imgPath.c_str();
+            txdSlot = g_txdAddSlot(s.name.c_str(), p, false);
+            if (txdSlot < 0) { Log("  PNG de '%s': no se pudo registrar en el CTxdStore", s.name.c_str()); continue; }
+        }
+        void* entries = GetTxdEntriesBase();
+        if (!entries) continue;
+        void* entry = (char*)entries + (uintptr_t)txdSlot * 0x40;
+        void* curDict = *(void**)entry;
+        auto it = g_pngDicts.find(low);
+        if (it != g_pngDicts.end()) {
+            if (curDict == it->second) continue;   // el diccionario PNG ya esta registrado
+            if (curDict) { Log("  PNG de '%s': la entrada ya tiene otro diccionario (hueco %d): las PNG no lo sobrescriben", s.name.c_str(), txdSlot); continue; }
+            *(void**)entry = it->second;   // la sesion reseteo la entrada: se vuelve a registrar el mismo diccionario
+            g_txdAddRef(txdSlot);
+            Log("  diccionario PNG de '%s' re-registrado (hueco %d)", s.name.c_str(), txdSlot);
+            done++;
+            continue;
+        }
+        if (curDict) { Log("  PNG de '%s': el .txd ya tiene diccionario (hueco %d): las PNG no lo sobrescriben", s.name.c_str(), txdSlot); g_pngDicts[low] = curDict; continue; }
+        // Escanear la carpeta de la skin por .png
+        std::vector<std::pair<std::string, std::string>> pngs;   // (nombre de textura, ruta)
+        DIR* d = opendir(s.dir.c_str());
+        if (!d) continue;
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            if (n.empty() || n[0] == '.') continue;
+            if (!skinscan::EndsWith(n, ".png")) continue;
+            std::string full = s.dir + "/" + n;
+            struct stat st;
+            if (stat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            std::string texName = n.substr(0, n.size() - 4);
+            if (texName.empty() || texName.size() > 32) continue;
+            pngs.push_back({texName, full});
+        }
+        closedir(d);
+        if (pngs.empty()) continue;
+        void* dict = g_rwTexDictionaryCreate();
+        if (!dict) { Log("  PNG de '%s': RwTexDictionaryCreate fallo", s.name.c_str()); continue; }
+        int ok = 0;
+        for (auto& p : pngs) {
+            void* tex = LoadPngTexture(p.second, p.first);
+            if (!tex) continue;
+            if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    PNG '%s': no se pudo meter en el diccionario", p.first.c_str()); continue; }
+            ok++;
+        }
+        if (ok == 0) { Log("  PNG de '%s': ningun PNG cargo (se queda sin texturas)", s.name.c_str()); continue; }
+        *(void**)entry = dict;
+        g_txdAddRef(txdSlot);
+        g_pngDicts[low] = dict;
+        Log("  texturas PNG de '%s' CARGADAS (%d textura(s), hueco %d): la skin ya se ve con texturas", s.name.c_str(), ok, txdSlot);
+        done++;
+    }
+    return done;
 }
 
 // Localiza un global del juego escaneando el codigo de CStreaming::RequestModel

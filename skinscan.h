@@ -19,8 +19,8 @@ struct Skin {
     std::string dir;   // subcarpeta que la contiene (ARCXLoader/<nombre>/); vacio en modloader/
     bool hasTxd = false;
     std::string txdPath;   // primer .txd de su carpeta (ARCXLoader); vacio si no tiene
-    int pngCount = 0;      // .png en su carpeta (se listan; las texturas van en el .txd)
-    int jpgCount = 0;      // .jpg en su carpeta (igual que los .png)
+    int pngCount = 0;      // .png en su carpeta (3.1.20: se cargan directo como texturas, sin .txd)
+    int jpgCount = 0;      // .jpg en su carpeta (aun no se cargan: el juego no trae lector JPEG)
 };
 
 inline std::string Lower(std::string s) {

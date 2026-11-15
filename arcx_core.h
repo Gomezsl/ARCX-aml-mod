@@ -41,6 +41,16 @@ static void* (*RwStreamOpen)(int, int, const void*);       // RwStreamOpen (opci
 static void* (*RwTexDictionaryStreamRead)(void*);          // RwTexDictionaryStreamRead (opcional: lee un diccionario de texturas de un flujo)
 static void  (*RwStreamClose)(void*, void*);               // RwStreamClose (opcional: cierra un flujo de RenderWare)
 static void  (*TxdAddRef)(int);                            // CTxdStore::AddRef (opcional: sube el contador de referencias de un .txd)
+static void* (*RtPngImageRead)(const char*);              // RtPNGImageRead (opcional: lee un PNG a una RwImage; 3.1.20 texturas PNG directas)
+static void* (*RwImageFindRasterFormat)(void*, int, int*, int*, int*, int*); // RwImageFindRasterFormat (opcional: formato de raster de una imagen; 3.1.20)
+static void* (*RwRasterCreate)(int, int, int, int);       // RwRasterCreate (opcional: crea un raster; 3.1.20)
+static void* (*RwRasterSetFromImage)(void*, void*);       // RwRasterSetFromImage (opcional: copia una imagen a un raster; 3.1.20)
+static void* (*RwTextureCreate)(void*);                   // RwTextureCreate (opcional: crea una textura de un raster; 3.1.20)
+static void  (*RwTextureSetName)(void*, const char*);     // RwTextureSetName (opcional: nombre de una textura; 3.1.20)
+static void* (*RwTexDictionaryCreate)();                  // RwTexDictionaryCreate (opcional: diccionario de texturas nuevo; 3.1.20)
+static void* (*RwTexDictionaryAddTexture)(void*, void*);  // RwTexDictionaryAddTexture (opcional: mete una textura en un diccionario; 3.1.20)
+static void  (*RwImageDestroy)(void*);                    // RwImageDestroy (opcional: libera una RwImage; 3.1.20)
+static void  (*RwRasterDestroy)(void*);                   // RwRasterDestroy (opcional: libera un RwRaster; 3.1.20)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
 static void  (*CGame_Process_orig)();
@@ -771,6 +781,14 @@ static void Watchdog() {
         } else loader::RegisterImg(AddImageToList, CFileMgrOpenFile, CFileMgrCloseFile, g_frame);
     }
 
+    // Texturas PNG de las skins propias (3.1.20): en cuanto el IMG esta
+    // registrado, se cargan las PNG de cada skin propia en un diccionario de
+    // RenderWare y se registran en el CTxdStore (sin .txd). La funcion salta
+    // las skins que ya cargaron y re-registra el diccionario si al cargar una
+    // partida nueva la entrada se reseteo, asi que llamarla a cada frame es
+    // barato (solo recorre la lista y hace una busqueda por skin).
+    if (loader::ImgRegistered()) loader::LoadPngForSkins(g_skins);
+
     // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
     if ((g_pauseUser && *g_pauseUser) || (g_pauseCode && *g_pauseCode)) return;
 
@@ -889,6 +907,16 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(RwTexDictionaryStreamRead,         "_Z25RwTexDictionaryStreamReadP8RwStream"); // opcional: lee un diccionario de texturas de un flujo (3.1.19)
     SYM(RwStreamClose,                     "_Z13RwStreamCloseP8RwStreamPv");         // opcional: cierra un flujo de RenderWare (3.1.19)
     SYM(TxdAddRef,                         "_ZN9CTxdStore6AddRefEi");                // opcional: sube el contador de referencias de un .txd (3.1.19)
+    SYM(RtPngImageRead,                    "_Z14RtPNGImageReadPKc");                 // opcional: lee un PNG a una RwImage (3.1.20: texturas PNG directas, como CustomCharacter)
+    SYM(RwImageFindRasterFormat,           "_Z23RwImageFindRasterFormatP7RwImageiPiS1_S1_S1_"); // opcional: formato de raster de una imagen (3.1.20)
+    SYM(RwRasterCreate,                    "_Z14RwRasterCreateiiii");                // opcional: crea un raster (3.1.20)
+    SYM(RwRasterSetFromImage,              "_Z20RwRasterSetFromImageP8RwRasterP7RwImage"); // opcional: copia una imagen a un raster (3.1.20)
+    SYM(RwTextureCreate,                   "_Z15RwTextureCreateP8RwRaster");         // opcional: crea una textura de un raster (3.1.20)
+    SYM(RwTextureSetName,                  "_Z16RwTextureSetNameP9RwTexturePKc");    // opcional: nombre de una textura (3.1.20)
+    SYM(RwTexDictionaryCreate,             "_Z21RwTexDictionaryCreatev");            // opcional: diccionario de texturas nuevo (3.1.20)
+    SYM(RwTexDictionaryAddTexture,         "_Z25RwTexDictionaryAddTextureP15RwTexDictionaryP9RwTexture"); // opcional: mete una textura en un diccionario (3.1.20)
+    SYM(RwImageDestroy,                    "_Z14RwImageDestroyP7RwImage");           // opcional: libera una RwImage (3.1.20)
+    SYM(RwRasterDestroy,                   "_Z15RwRasterDestroyP8RwRaster");         // opcional: libera un RwRaster (3.1.20)
     // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
     // dentro de GetEntry): solo se usa su direccion para localizar el objeto
     // CDirectory y el array CStreamingInfo escaneando su codigo.
@@ -898,6 +926,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize, RequestModel);
     loader::InitQueue((void*)RequestModel);   // localiza la cabeza de la cola de peticiones (3.1.14: para meter los .txd en la cola)
     loader::InitDirectTxd((void*)RwStreamOpen, (void*)RwTexDictionaryStreamRead, (void*)RwStreamClose, (void*)TxdAddRef);   // carga directa del .txd con RenderWare (3.1.19)
+    loader::InitPng((void*)RtPngImageRead, (void*)RwImageFindRasterFormat, (void*)RwRasterCreate, (void*)RwRasterSetFromImage, (void*)RwTextureCreate, (void*)RwTextureSetName, (void*)RwTexDictionaryCreate, (void*)RwTexDictionaryAddTexture, (void*)RwImageDestroy, (void*)RwRasterDestroy);   // texturas PNG directas, sin .txd (3.1.20, como CustomCharacter)
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
