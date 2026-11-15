@@ -76,6 +76,18 @@
 // comprobación (capacidad > 0 y conteo entre 0 y capacidad), el slot se
 // reserva una sola vez por sesión y tras un fallo se espera ~10 s antes de
 // reintentarlo, sin volver a reservar slot.
+//
+// 3.1.10: LoadCdDirectory TRUNCA el nombre de cada entrada en el primer '.'
+// antes de meterla en el CDirectory (desensamblado 0x557bcc-0x557bf8: strchr
+// busca '.', escribe 0 ahi y luego decide por la extension: solo "DFF" va
+// a AddItem, "TXD" va al CTxdStore). En 3.1.9 ARCX metia el nombre completo
+// ("suk.dff") en el CDirectory, asi que FindItem("suk") no encontraba nada
+// (compara el nombre entero) y RequestSpecialModel llenaba el CStreamingInfo
+// del slot con basura del stack (no comprueba si FindItem encontro algo):
+// 'suk' nunca cargaba y el pedido roto atascaba tambien las skins de ZyZ.
+// Ahora LoadImgDirectory hace lo mismo que el juego: trunca en '.' y solo
+// mete los .dff (los .txd NO van al CDirectory; sus texturas son el
+// siguiente paso, registrandolos en el CTxdStore como hace LoadCdDirectory).
 // Las texturas .png/.jpg se inventarian y se muestran en el log, pero NO se
 // convierten a texturas: para que la skin se vea con texturas necesita su
 // .txd (esa conversion la hacia ZyZ; aqui no se reimplementa).
@@ -83,6 +95,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <strings.h>   // strncasecmp (POSIX; no viene en <cstring>)
 #include <string>
 #include <vector>
 #include <map>
@@ -466,9 +479,15 @@ static void InitCdDirectory(void* loadCdDirectoryFn, void (*addItem)(void*, cons
 // lleva el indice del slot en el byte alto (como hace LoadCdDirectory); el
 // tamano se lee como medio de 16 bits en +4, y ARCX escribe sectores de 32
 // bits con la mitad alta en 0 (archivos pequenos), asi que se lee bien.
-// Las entradas que ya estan (re-registro tras cargar partida) se saltan con
-// FindItem, para no duplicarlas. AddItem se cae si el CDirectory esta lleno:
-// se comprueba la capacidad antes (+8 capacidad, +12 conteo).
+// IMPORTANTE (3.1.10): el nombre se trunca en el primer '.' antes de meterlo,
+// exactamente como hace LoadCdDirectory (0x557bcc-0x557bf8): "suk.dff" se
+// guarda como "suk", porque RequestSpecialModel busca con FindItem el nombre
+// SIN extension. Y solo los .dff van al CDirectory: los .txd van al
+// CTxdStore (no se meten aqui; si se metieran, FindItem encontraria el .txd
+// en vez del .dff). Las entradas que ya estan (re-registro tras cargar
+// partida) se saltan con FindItem, para no duplicarlas. AddItem se cae si el
+// CDirectory esta lleno: se comprueba la capacidad antes (+8 capacidad,
+// +12 conteo).
 static bool LoadImgDirectory(int slot, void* cdDir) {
     if (!cdDir || !g_cdDirAddItem) {
         Log("sin CDirectory del juego: el IMG se registro pero su directorio no se cargo (las skins propias no cargaran)");
@@ -482,13 +501,19 @@ static bool LoadImgDirectory(int slot, void* cdDir) {
     int32_t cap = *(int32_t*)((char*)cdDir + 8);
     int32_t cur = *(int32_t*)((char*)cdDir + 12);
     if (cur + (int32_t)count > cap) { fclose(f); Log("el CDirectory del juego esta lleno (%d/%d): no caben las %u entradas del IMG propio", cur, cap, count); return false; }
-    int added = 0, skipped = 0;
+    int added = 0, skipped = 0, notDff = 0;
     for (uint32_t i = 0; i < count; i++) {
         uint8_t ent[32];
         if (fread(ent, 1, 32, f) != 32) { ok = false; break; }
         ent[31] = '\0';   // el nombre va en +8 (24 bytes); se termina en +31 como hace el juego
-        const char* name = (const char*)ent + 8;
+        char* name = (char*)ent + 8;
         if (name[0] == '\0') continue;
+        char* dot = strchr(name, '.');
+        if (!dot) continue;   // sin extension: el juego lo ignora
+        size_t namelen = (size_t)(dot - name);
+        if (namelen == 0 || namelen >= 21) continue;   // el juego ignora nombres de 0 o >= 21 caracteres antes del '.'
+        if (strncasecmp(dot + 1, "dff", 3) != 0 || dot[4] != '\0') { notDff++; continue; }   // solo .dff va al CDirectory (los .txd van al CTxdStore)
+        *dot = '\0';   // "suk.dff" -> "suk": asi lo guarda el juego y asi lo busca RequestSpecialModel
         if (g_cdDirFindItem) {
             uint32_t off = 0, sz = 0;
             if (g_cdDirFindItem(cdDir, name, &off, &sz)) { skipped++; continue; }   // ya esta: no se duplica
@@ -501,7 +526,7 @@ static bool LoadImgDirectory(int slot, void* cdDir) {
     }
     fclose(f);
     if (!ok) { Log("el IMG propio se leyo incompleto: su directorio quedo a medias"); return false; }
-    Log("directorio del IMG cargado en el juego (slot %d): %d entrada(s) nuevas, %d ya estaban", slot, added, skipped);
+    Log("directorio del IMG cargado en el juego (slot %d): %d .dff nuevos, %d ya estaban, %d no-.dff (van al CTxdStore, no al CDirectory)", slot, added, skipped, notDff);
     return true;
 }
 
