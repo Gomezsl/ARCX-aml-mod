@@ -1303,16 +1303,14 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
         if (!dict) { Log("  PNG de '%s': RwTexDictionaryCreate fallo", s.name.c_str()); continue; }
         int ok = 0;
         for (auto& p : pngs) {
-            // 3.1.30: las PNG se decodifican con stb_image (como las JPG y
-            // como hace ZyZ: decodificador propio + RwImage manual), no con
-            // RtPNGImageRead del juego. La 3.1.29 probo que el ligado (hook
-            // nativo vs cache) no era la causa del tirante gris/retorcido
-            // de Ghost ni de las texturas transparentes: el ligado es el
-            // mismo y las texturas cargan, asi que la diferencia que queda
-            // es COMO se decodifica la PNG. Si stb_image falla, se usa el
-            // lector del juego como antes (no se pierde la textura).
-            void* tex = LoadImageViaStb(p.second, p.first, "PNG");
-            if (!tex) tex = LoadPngTexture(p.second, p.first);
+            // 3.1.31 (REVERSO de 3.1.30): las PNG vuelven a RtPNGImageRead
+            // del juego. La 3.1.30 las decodifico con stb_image y salieron
+            // PEOR: la captura muestra el chaleco con ruido morado/verde
+            // (pixeles corruptos) y el juego se cerro con el crash de
+            // RenderEntity de Ghost. El lector del juego (3.1.28/3.1.29)
+            // las deja grises/retorcidas pero no corruptas. No se vuelve a
+            // usar stb_image para PNG.
+            void* tex = LoadPngTexture(p.second, p.first);
             if (!tex) continue;
             if (!g_rwTexDictionaryAddTexture(dict, tex)) { Log("    PNG '%s': no se pudo meter en el diccionario", p.first.c_str()); continue; }
             g_pngTextures[skinscan::Lower(p.first)] = tex;   // 3.1.22: tambien en la cache por nombre, para el hook de RwTextureRead
