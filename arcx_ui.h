@@ -239,27 +239,30 @@ static void LogGlState(const char* why, EGLContext ctx, int w, int h) {
 enum { K_CJ, K_WORN, K_REMEMBER, K_LOCK, K_RESCAN, K_LANG, K_THEME, K_BTNSIZE, K_OPACITY, K_HINT, K_WAIT,
        K_TAB_SKINS, K_TAB_SET, K_NOSKINS, K_SEC_GENERAL, K_SEC_LOOK, K_SEC_ABOUT, K_COUNT_FMT,
        K_SEC_ZYZ, K_SEC_LOADER, K_ZYZ_ON, K_LOADER_ON, K_RESCAN_ZYZ, K_RESCAN_LOADER,
-       K_ZYZ_COUNT_FMT, K_LOADER_COUNT_FMT, K_LOADER_NOTE, K_COUNT };
+       K_ZYZ_COUNT_FMT, K_LOADER_COUNT_FMT, K_LOADER_NOTE, K_FROM_ZYZ, K_FROM_LOADER, K_COUNT };
 static const char* kText[3][K_COUNT] = {
     {"Volver a ser CJ", "PUESTA", "Recordar última skin", "Bloquear botón", "Releer carpeta de skins", "Idioma", "Color",
      "Tamaño del botón", "Opacidad", "Desliza para ver más", "Esperando: jugador %s...", "SKINS", "AJUSTES",
      "No hay skins en modloader/", "GENERAL", "APARIENCIA", "ACERCA DE", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (PROPIO)", "ZyZ ModLoader", "ARCXLoader (propio)", "Releer modloader/", "Releer ARCXLoader/",
-     "%d skins en modloader/", "%d skins propias, %d png/jpg", "Skins propias: se sirven desde el IMG de ARCXLoader"},
+     "%d skins en modloader/", "%d skins propias, %d png/jpg", "Skins propias: se sirven desde el IMG de ARCXLoader",
+     "Cargado desde ZyZ ModLoader", "Cargado desde ARCXLoader"},
     {"Back to CJ", "WORN", "Remember last skin", "Lock button", "Reload skins folder", "Language", "Color",
      "Button size", "Opacity", "Swipe to see more", "Waiting: player %s...", "SKINS", "SETTINGS",
      "No skins in modloader/", "GENERAL", "APPEARANCE", "ABOUT", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (OWN)", "ZyZ ModLoader", "ARCXLoader (own)", "Reload modloader/", "Reload ARCXLoader/",
-     "%d skins in modloader/", "%d own skins, %d png/jpg", "Own skins: served from the ARCXLoader IMG"},
+     "%d skins in modloader/", "%d own skins, %d png/jpg", "Own skins: served from the ARCXLoader IMG",
+     "Loaded from ZyZ ModLoader", "Loaded from ARCXLoader"},
     {"Kembali jadi CJ", "DIPAKAI", "Ingat skin terakhir", "Kunci tombol", "Muat ulang folder skin", "Bahasa", "Warna",
      "Ukuran tombol", "Opasitas", "Geser untuk melihat lagi", "Menunggu: pemain %s...", "SKIN", "PENGATURAN",
      "Tidak ada skin di modloader/", "UMUM", "TAMPILAN", "TENTANG", "%d skin",
      "ZYZ MODLOADER", "ARCXLOADER (SENDIRI)", "ZyZ ModLoader", "ARCXLoader (sendiri)", "Muat ulang modloader/", "Muat ulang ARCXLoader/",
-     "%d skin di modloader/", "%d skin sendiri, %d png/jpg", "Skin sendiri: disajikan dari IMG ARCXLoader"}};
+     "%d skin di modloader/", "%d skin sendiri, %d png/jpg", "Skin sendiri: disajikan dari IMG ARCXLoader",
+     "Dimuat dari ZyZ ModLoader", "Dimuat dari ARCXLoader"}};
 static const char* kLangName[3] = {"Español", "English", "Indonesia"};
-static const char* kThemeName[3][5] = {{"Por defecto", "Rojo", "Azul", "Verde", "Naranja"},
-                                       {"Default", "Red", "Blue", "Green", "Orange"},
-                                       {"Bawaan", "Merah", "Biru", "Hijau", "Oranye"}};
+static const char* kThemeName[3][5] = {{"ARCX", "Rojo", "Azul", "Verde", "Naranja"},
+                                       {"ARCX", "Red", "Blue", "Green", "Orange"},
+                                       {"ARCX", "Merah", "Biru", "Hijau", "Oranye"}};
 static const char* kStatusKey[4] = {"agachado", "peleando", "ocupado", "en vehiculo"};   // lo que escribe el nucleo
 static const char* kStatusName[3][4] = {{"agachado", "peleando", "ocupado", "en vehículo"},
                                         {"crouching", "fighting", "busy", "in a vehicle"},
@@ -283,10 +286,10 @@ static std::string StatusText(const std::string& st) {
 }
 
 // ---- colores: 5 temas; el color tine el panel, las filas, las pestanas y el boton ----------------------
-static const ImVec4 kAccent[5] = {ImVec4(0.20f, 0.45f, 0.80f, 1.0f), ImVec4(0.88f, 0.18f, 0.18f, 1.0f),
+static const ImVec4 kAccent[5] = {ImVec4(0.45f, 0.30f, 0.95f, 1.0f), ImVec4(0.88f, 0.18f, 0.18f, 1.0f),
                                   ImVec4(0.08f, 0.56f, 0.96f, 1.0f), ImVec4(0.16f, 0.74f, 0.32f, 1.0f),
                                   ImVec4(0.98f, 0.52f, 0.06f, 1.0f)};
-static const float kTint[5] = {0.16f, 0.36f, 0.36f, 0.36f, 0.36f};
+static const float kTint[5] = {0.24f, 0.36f, 0.36f, 0.36f, 0.36f};
 
 struct Pal { ImVec4 accent, title, bg, row, rowHover, rowActive, seg; };
 static ImVec4 Mix(const ImVec4& a, const ImVec4& b, float t) {
@@ -388,6 +391,8 @@ enum { R_ACTION, R_SKIN, R_SWITCH, R_VALUE, R_COLORS, R_SLIDER, R_SECTION, R_INF
 struct Row {
     int kind = R_ACTION;
     std::string label, right;
+    std::string sub;             // subtitulo (origen de la skin: "Cargado desde ...")
+    bool subAcc = false;         // subtitulo en color de acento (ARCXLoader)
     ImVec4 col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
     int action = 0;
     std::string arg;
@@ -410,6 +415,7 @@ static float RowH(const Row& r, float u) {
         case R_SECTION: return 44.0f * u;
         case R_SLIDER: return 98.0f * u;
         case R_INFO: return 46.0f * u;
+        case R_SKIN: return r.sub.empty() ? 64.0f * u : 88.0f * u;   // con subtitulo de origen, la fila es mas alta
         default: return 64.0f * u;
     }
 }
@@ -581,8 +587,21 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             dl->AddCircle(ImVec2(kx, ty), 16.0f * u, acc, 24, 3.0f * u);
         } else {
             dl->PushClipRect(a, ImVec2(b.x - reserve, b.y), true);
-            ImVec2 ts = ImGui::CalcTextSize(r.label.c_str());
-            dl->AddText(ImVec2(tx, midY - ts.y * 0.5f), ImGui::GetColorU32(r.col), r.label.c_str());
+            if (r.kind == R_SKIN && !r.sub.empty()) {
+                // nombre arriba + origen abajo ("Cargado desde ARCXLoader" /
+                // "Cargado desde ZyZ ModLoader"); el de ARCXLoader va en
+                // color de acento para que las propias destaquen.
+                ImVec2 lts = ImGui::CalcTextSize(r.label.c_str());
+                float sfs = fs * 0.68f;
+                ImVec2 sts = fn->CalcTextSizeA(sfs, 100000.0f, 0.0f, r.sub.c_str());
+                float gap = 4.0f * u;
+                float y0 = midY - (lts.y + gap + sts.y) * 0.5f;
+                dl->AddText(ImVec2(tx, y0), ImGui::GetColorU32(r.col), r.label.c_str());
+                dl->AddText(fn, sfs, ImVec2(tx, y0 + lts.y + gap), r.subAcc ? acc : greyU, r.sub.c_str());
+            } else {
+                ImVec2 ts = ImGui::CalcTextSize(r.label.c_str());
+                dl->AddText(ImVec2(tx, midY - ts.y * 0.5f), ImGui::GetColorU32(r.col), r.label.c_str());
+            }
             dl->PopClipRect();
         }
     }
@@ -745,6 +764,12 @@ static void BuildUI(float W, float H, float u) {
             Row r; r.kind = R_SKIN; r.label = snap.skins[i]; r.action = 1; r.arg = snap.skins[i];
             r.selected = (snap.skins[i] == snap.current);
             if (r.selected) r.right = Tr(K_WORN);
+            // origen de la skin: se muestra debajo del nombre ("Cargado desde
+            // ARCXLoader" / "Cargado desde ZyZ ModLoader"). Viene del
+            // snapshot (skinSrc: 1 = ARCXLoader, 0 = ZyZ modloader).
+            int src = (i < (int)snap.skinSrc.size()) ? snap.skinSrc[i] : 0;
+            r.sub = src == 1 ? Tr(K_FROM_LOADER) : Tr(K_FROM_ZYZ);
+            r.subAcc = (src == 1);
             rows.push_back(r);
         }
         if (total == 0) { Row r; r.kind = R_INFO; r.label = Tr(K_NOSKINS); rows.push_back(r); }
@@ -769,7 +794,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.34-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.35-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);

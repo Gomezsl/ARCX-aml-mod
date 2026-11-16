@@ -129,6 +129,7 @@ static int g_nullFrames = 0;
 // ---- datos publicados para la interfaz (el hilo de render los lee con GetSnapshot) -------------------
 static std::mutex g_pubMtx;
 static std::vector<std::string> g_pubSkins;
+static std::vector<int> g_pubSkinSrc;   // origen por skin, en el mismo orden que g_pubSkins (0 = ZyZ modloader, 1 = ARCXLoader)
 static std::string g_pubCur = "CJ", g_pubStatus, g_pubTitle = "PROJECT ARCX";
 static bool g_pubRemember = false;
 static bool g_pubZyzOn = true, g_pubLoaderOn = true;
@@ -136,11 +137,12 @@ static int g_pubZyzCount = 0, g_pubLoaderCount = 0, g_pubLoaderPngs = 0;
 static std::string g_status;        // "agachado", "peleando"...: motivo de la espera; vacio = libre
 static std::string g_stateCur = "CJ";
 
-struct Snapshot { std::vector<std::string> skins; std::string current, status, title; bool remember = false;
+struct Snapshot { std::vector<std::string> skins; std::vector<int> skinSrc; std::string current, status, title; bool remember = false;
                   bool zyzOn = true, loaderOn = true; int zyzCount = 0, loaderCount = 0, loaderPngs = 0; };
 static void GetSnapshot(Snapshot& o) {
     std::lock_guard<std::mutex> lk(g_pubMtx);
     o.skins = g_pubSkins;
+    o.skinSrc = g_pubSkinSrc;
     o.current = g_pubCur;
     o.status = g_pubStatus;
     o.title = g_pubTitle;
@@ -217,7 +219,8 @@ static void WriteList() {           // publica la lista y la deja tambien en ARC
     {
         std::lock_guard<std::mutex> lk(g_pubMtx);
         g_pubSkins.clear();
-        for (auto& s : g_skins) g_pubSkins.push_back(s.name);
+        g_pubSkinSrc.clear();
+        for (auto& s : g_skins) { g_pubSkins.push_back(s.name); g_pubSkinSrc.push_back(s.src); }
     }
     vsa::CfgUpdate([&](vsa::Ini& ini) {
         auto& sec = ini["Skins"];
