@@ -39,6 +39,7 @@ static void (*InfoSetCdPosnAndSize)(void*, uint32_t, uint32_t); // CStreamingInf
 static void (*RequestModel)(int, int);                   // CStreaming::RequestModel (opcional: pide un modelo/txd al streaming)
 static void* (*RwStreamOpen)(int, int, const void*);       // RwStreamOpen (opcional: abre un flujo de RenderWare; 3.1.19 carga directa del .txd)
 static void* (*RwTexDictionaryStreamRead)(void*);          // RwTexDictionaryStreamRead (opcional: lee un diccionario de texturas de un flujo)
+static void* (*RwTexDictionaryGtaStreamRead)(void*);       // RwTexDictionaryGtaStreamRead (opcional: lector PROPIO de GTA, el que usa ZyZ; 3.1.33)
 static void  (*RwStreamClose)(void*, void*);               // RwStreamClose (opcional: cierra un flujo de RenderWare)
 static void  (*TxdAddRef)(int);                            // CTxdStore::AddRef (opcional: sube el contador de referencias de un .txd)
 static void* (*RtPngImageRead)(const char*);              // RtPNGImageRead (opcional: lee un PNG a una RwImage; 3.1.20 texturas PNG directas)
@@ -987,6 +988,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(RequestModel,                     "_ZN10CStreaming12RequestModelEii");   // opcional: pide un modelo/txd al streaming (lo carga)
     SYM(RwStreamOpen,                      "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv"); // opcional: abre un flujo de RenderWare (3.1.19)
     SYM(RwTexDictionaryStreamRead,         "_Z25RwTexDictionaryStreamReadP8RwStream"); // opcional: lee un diccionario de texturas de un flujo (3.1.19)
+    SYM(RwTexDictionaryGtaStreamRead,      "_Z28RwTexDictionaryGtaStreamReadP8RwStream"); // opcional: lector PROPIO de GTA, el que usa ZyZ (3.1.33)
     SYM(RwStreamClose,                     "_Z13RwStreamCloseP8RwStreamPv");         // opcional: cierra un flujo de RenderWare (3.1.19)
     SYM(TxdAddRef,                         "_ZN9CTxdStore6AddRefEi");                // opcional: sube el contador de referencias de un .txd (3.1.19)
     SYM(RtPngImageRead,                    "_Z14RtPNGImageReadPKc");                 // opcional: lee un PNG a una RwImage (3.1.20: texturas PNG directas, como CustomCharacter)
@@ -1008,7 +1010,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
     loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize, RequestModel);
     loader::InitQueue((void*)RequestModel);   // localiza la cabeza de la cola de peticiones (3.1.14: para meter los .txd en la cola)
-    loader::InitDirectTxd((void*)RwStreamOpen, (void*)RwTexDictionaryStreamRead, (void*)RwStreamClose, (void*)TxdAddRef);   // carga directa del .txd con RenderWare (3.1.19)
+    loader::InitDirectTxd((void*)RwStreamOpen, (void*)RwTexDictionaryStreamRead, (void*)RwStreamClose, (void*)TxdAddRef, (void*)RwTexDictionaryGtaStreamRead);   // carga directa del .txd con RenderWare (3.1.19, 3.1.33: lector de GTA primero)
     loader::InitPng((void*)RtPngImageRead, (void*)RwImageFindRasterFormat, (void*)RwRasterCreate, (void*)RwRasterSetFromImage, (void*)RwTextureCreate, (void*)RwTextureSetName, (void*)RwTexDictionaryCreate, (void*)RwTexDictionaryAddTexture, (void*)RwImageDestroy, (void*)RwRasterDestroy);   // texturas PNG directas, sin .txd (3.1.20, como CustomCharacter)
     SYM(CFileMgrOpenFile,                "_ZN8CFileMgr8OpenFileEPKcS1_");           // opcional: probar con que ruta abre el juego el IMG propio (0 = no abre)
     SYM(CFileMgrCloseFile,               "_ZN8CFileMgr9CloseFileEy");               // opcional

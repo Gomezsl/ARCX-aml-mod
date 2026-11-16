@@ -571,6 +571,7 @@ static uintptr_t g_reqCountGlobal = 0;    // direccion del global con el contado
 struct RwMemory { void* start; uint32_t length; };   // lo que RwStreamOpen(rwSTREAMMEMORY) espera como tercer argumento
 static void* (*g_rwStreamOpen)(int, int, const void*) = nullptr;        // RwStreamOpen(tipo, acceso, datos) -> RwStream* o null
 static void* (*g_rwTexDictionaryStreamRead)(void*) = nullptr;            // RwTexDictionaryStreamRead(stream) -> RwTexDictionary* o null
+static void* (*g_rwTexDictionaryGtaStreamRead)(void*) = nullptr;         // RwTexDictionaryGtaStreamRead(stream) -> RwTexDictionary* o null (3.1.33: el lector PROPIO de GTA, el que usa ZyZ; el generico falla con trut.txd aunque es 8888 movil)
 static void (*g_rwStreamClose)(void*, void*) = nullptr;                  // RwStreamClose(stream, datos) (el segundo argumento es null)
 static void (*g_txdAddRef)(int) = nullptr;                               // CTxdStore::AddRef(hueco) (sube el contador de referencias)
 static uintptr_t g_txdStoreGlobal = 0;   // direccion del global con la tabla del CTxdStore (0 = no localizado)
@@ -666,11 +667,12 @@ static void* GetTxdEntriesBase() {
 
 // Guarda las funciones de RenderWare para la carga directa del .txd (3.1.19)
 // y localiza el global con la tabla del CTxdStore.
-static void InitDirectTxd(void* rwStreamOpen, void* rwTexDictionaryStreamRead, void* rwStreamClose, void* txdAddRef) {
+static void InitDirectTxd(void* rwStreamOpen, void* rwTexDictionaryStreamRead, void* rwStreamClose, void* txdAddRef, void* rwTexDictionaryGtaStreamRead) {
     g_rwStreamOpen = (void* (*)(int, int, const void*))rwStreamOpen;
     g_rwTexDictionaryStreamRead = (void* (*)(void*))rwTexDictionaryStreamRead;
     g_rwStreamClose = (void (*)(void*, void*))rwStreamClose;
     g_txdAddRef = (void (*)(int))txdAddRef;
+    g_rwTexDictionaryGtaStreamRead = (void* (*)(void*))rwTexDictionaryGtaStreamRead;
     g_txdStoreGlobal = FindTxdStoreGlobal(txdAddRef);
     if (g_txdStoreGlobal) Log("tabla del CTxdStore localizada (global %p)", (void*)g_txdStoreGlobal);
 }
@@ -712,10 +714,30 @@ static bool LoadTxdDirect(const char* name, void* data, size_t dataSize) {
     void* entry = (char*)entries + (uintptr_t)txdSlot * 0x40;
     if (*(void**)entry) { Log("  txd de '%s': su diccionario ya estaba cargado (hueco %d)", name, txdSlot); return true; }
     RwMemory mem = { data, (uint32_t)dataSize };
-    void* stream = g_rwStreamOpen(3, 1, &mem);   // rwSTREAMMEMORY, rwSTREAMREAD
-    if (!stream) { Log("  RwStreamOpen no pudo abrir el .txd '%s' desde memoria", name); return false; }
-    void* dict = g_rwTexDictionaryStreamRead(stream);
-    g_rwStreamClose(stream, nullptr);
+    // 3.1.33: primero el lector PROPIO de GTA (RwTexDictionaryGtaStreamRead,
+    // el que usa ZyZ ModLoader). El generico (RwTexDictionaryStreamRead)
+    // falla con trut.txd aunque es un .txd movil 8888 valido, y eso obligaba
+    // a decodificar por software, que registra las texturas con nombres que
+    // el .dff liga MAL (la hombrera de trut salia roja = textura del casco,
+    // el casco oscuro, la bufanda en la cara). Con el lector de GTA el .txd
+    // se carga como lo carga ZyZ y las texturas ligan bien. Cada intento usa
+    // un flujo nuevo, porque un lector que falla deja el flujo en un punto
+    // indefinido.
+    void* dict = nullptr;
+    if (g_rwTexDictionaryGtaStreamRead) {
+        void* stream = g_rwStreamOpen(3, 1, &mem);   // rwSTREAMMEMORY, rwSTREAMREAD
+        if (stream) {
+            dict = g_rwTexDictionaryGtaStreamRead(stream);
+            g_rwStreamClose(stream, nullptr);
+            if (dict) Log("  txd de '%s': leido con RwTexDictionaryGtaStreamRead (como ZyZ)", name);
+        }
+    }
+    if (!dict) {
+        void* stream = g_rwStreamOpen(3, 1, &mem);
+        if (!stream) { Log("  RwStreamOpen no pudo abrir el .txd '%s' desde memoria", name); return false; }
+        dict = g_rwTexDictionaryStreamRead(stream);
+        g_rwStreamClose(stream, nullptr);
+    }
     if (!dict) {
         // 3.1.26: el StreamRead fallo (casi siempre porque el .txd es DXT1/
         // DXT3/DXT5 de PC y la GPU Mali no lo decodifica). En vez de dejar
