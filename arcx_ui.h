@@ -139,6 +139,8 @@ static void CreateLogoTexture() {
 
 // ---- ajustes de la interfaz: ARCXConfigs.ini, seccion [Menu] --------------------------------------------
 static int g_theme = 0;                       // 0 por defecto, 1 rojo, 2 azul, 3 verde, 4 naranja
+static ImVec4 g_customCol(0.45f, 0.30f, 0.95f, 1.0f);   // color RGB personalizado (por defecto, el violeta ARCX)
+static bool g_useCustom = false;              // true = usar el color personalizado en vez del tema
 static int g_lang = 0;                        // 0 espanol, 1 ingles, 2 indonesio
 static float g_btnMul = 1.0f;                 // tamano del boton
 static float g_alpha = 1.0f;                  // opacidad del menu y del boton
@@ -161,6 +163,10 @@ static void SaveMenuSettings() {
         char b[32];
         m["theme"] = std::to_string(th);
         m["lang"] = std::to_string(lg);
+        snprintf(b, sizeof b, "%.3f", g_customCol.x); m["custom_r"] = b;
+        snprintf(b, sizeof b, "%.3f", g_customCol.y); m["custom_g"] = b;
+        snprintf(b, sizeof b, "%.3f", g_customCol.z); m["custom_b"] = b;
+        m["custom_use"] = g_useCustom ? "1" : "0";
         snprintf(b, sizeof b, "%.2f", bm); m["button_size"] = b;
         snprintf(b, sizeof b, "%.2f", al); m["opacity"] = b;
         snprintf(b, sizeof b, "%.4f", bx); m["button_x"] = b;
@@ -177,6 +183,10 @@ static void LoadMenuSettings() {
     if (ini.find("Menu") == ini.end()) return;
     int v = vsa::GetInt(ini, "Menu", "theme", 0);  if (v >= 0 && v < 5) g_theme = v;
     v = vsa::GetInt(ini, "Menu", "lang", 0);       if (v >= 0 && v < 3) g_lang = v;
+    g_customCol.x = Clampf(vsa::GetFloat(ini, "Menu", "custom_r", 0.45f), 0.0f, 1.0f);
+    g_customCol.y = Clampf(vsa::GetFloat(ini, "Menu", "custom_g", 0.30f), 0.0f, 1.0f);
+    g_customCol.z = Clampf(vsa::GetFloat(ini, "Menu", "custom_b", 0.95f), 0.0f, 1.0f);
+    g_useCustom = vsa::GetInt(ini, "Menu", "custom_use", 0) == 1;
     g_btnMul = Clampf(vsa::GetFloat(ini, "Menu", "button_size", 1.0f), kBtnLo, kBtnHi);
     g_alpha = Clampf(vsa::GetFloat(ini, "Menu", "opacity", 1.0f), kAlphaLo, kAlphaHi);
     g_btnFx = Clampf(vsa::GetFloat(ini, "Menu", "button_x", 0.012f), 0.0f, 1.0f);
@@ -239,26 +249,33 @@ static void LogGlState(const char* why, EGLContext ctx, int w, int h) {
 enum { K_CJ, K_WORN, K_REMEMBER, K_LOCK, K_RESCAN, K_LANG, K_THEME, K_BTNSIZE, K_OPACITY, K_HINT, K_WAIT,
        K_TAB_SKINS, K_TAB_SET, K_NOSKINS, K_SEC_GENERAL, K_SEC_LOOK, K_SEC_ABOUT, K_COUNT_FMT,
        K_SEC_ZYZ, K_SEC_LOADER, K_ZYZ_ON, K_LOADER_ON, K_RESCAN_ZYZ, K_RESCAN_LOADER,
-       K_ZYZ_COUNT_FMT, K_LOADER_COUNT_FMT, K_LOADER_NOTE, K_FROM_ZYZ, K_FROM_LOADER, K_COUNT };
+       K_ZYZ_COUNT_FMT, K_LOADER_COUNT_FMT, K_LOADER_NOTE, K_FROM_ZYZ, K_FROM_LOADER,
+       K_SEC_COLOR, K_CUSTOM, K_RGB_R, K_RGB_G, K_RGB_B, K_COLOR_RESET, K_ZYZ_LOCKED, K_COUNT };
 static const char* kText[3][K_COUNT] = {
     {"Volver a ser CJ", "PUESTA", "Recordar última skin", "Bloquear botón", "Releer carpeta de skins", "Idioma", "Color",
      "Tamaño del botón", "Opacidad", "Desliza para ver más", "Esperando: jugador %s...", "SKINS", "AJUSTES",
      "No hay skins en modloader/", "GENERAL", "APARIENCIA", "ACERCA DE", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (PROPIO)", "ZyZ ModLoader", "ARCXLoader (propio)", "Releer modloader/", "Releer ARCXLoader/",
      "%d skins en modloader/", "%d skins propias, %d png/jpg", "Skins propias: se sirven desde el IMG de ARCXLoader",
-     "Cargado desde ZyZ ModLoader", "Cargado desde ARCXLoader"},
+     "Cargado desde ZyZ ModLoader", "Cargado desde ARCXLoader",
+     "COLOR", "Personalizado", "Rojo", "Verde", "Azul", "Restablecer color ARCX",
+     "Instala el plugin ZyZ ModLoader para usar esta función"},
     {"Back to CJ", "WORN", "Remember last skin", "Lock button", "Reload skins folder", "Language", "Color",
      "Button size", "Opacity", "Swipe to see more", "Waiting: player %s...", "SKINS", "SETTINGS",
      "No skins in modloader/", "GENERAL", "APPEARANCE", "ABOUT", "%d skins",
      "ZYZ MODLOADER", "ARCXLOADER (OWN)", "ZyZ ModLoader", "ARCXLoader (own)", "Reload modloader/", "Reload ARCXLoader/",
      "%d skins in modloader/", "%d own skins, %d png/jpg", "Own skins: served from the ARCXLoader IMG",
-     "Loaded from ZyZ ModLoader", "Loaded from ARCXLoader"},
+     "Loaded from ZyZ ModLoader", "Loaded from ARCXLoader",
+     "COLOR", "Custom", "Red", "Green", "Blue", "Reset to ARCX color",
+     "Install the ZyZ ModLoader plugin to use this feature"},
     {"Kembali jadi CJ", "DIPAKAI", "Ingat skin terakhir", "Kunci tombol", "Muat ulang folder skin", "Bahasa", "Warna",
      "Ukuran tombol", "Opasitas", "Geser untuk melihat lagi", "Menunggu: pemain %s...", "SKIN", "PENGATURAN",
      "Tidak ada skin di modloader/", "UMUM", "TAMPILAN", "TENTANG", "%d skin",
      "ZYZ MODLOADER", "ARCXLOADER (SENDIRI)", "ZyZ ModLoader", "ARCXLoader (sendiri)", "Muat ulang modloader/", "Muat ulang ARCXLoader/",
      "%d skin di modloader/", "%d skin sendiri, %d png/jpg", "Skin sendiri: disajikan dari IMG ARCXLoader",
-     "Dimuat dari ZyZ ModLoader", "Dimuat dari ARCXLoader"}};
+     "Dimuat dari ZyZ ModLoader", "Dimuat dari ARCXLoader",
+     "WARNA", "Kustom", "Merah", "Hijau", "Biru", "Setel ulang warna ARCX",
+     "Pasang plugin ZyZ ModLoader untuk memakai fitur ini"}};
 static const char* kLangName[3] = {"Español", "English", "Indonesia"};
 static const char* kThemeName[3][5] = {{"ARCX", "Rojo", "Azul", "Verde", "Naranja"},
                                        {"ARCX", "Red", "Blue", "Green", "Orange"},
@@ -296,8 +313,8 @@ static ImVec4 Mix(const ImVec4& a, const ImVec4& b, float t) {
     return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w);
 }
 static Pal MakePal() {
-    const ImVec4 a = kAccent[g_theme];
-    const float t = kTint[g_theme];
+    const ImVec4 a = g_useCustom ? g_customCol : kAccent[g_theme];
+    const float t = g_useCustom ? 0.24f : kTint[g_theme];
     Pal p;
     p.accent = a;
     p.title = Mix(a, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.55f);
@@ -438,6 +455,7 @@ struct Row {
     int action = 0;
     std::string arg;
     bool sw = false;             // interruptor encendido
+    bool locked = false;         // fila bloqueada (no se puede pulsar; p. ej. ZyZ sin instalar)
     bool selected = false;       // skin puesta
     float* val = nullptr;        // barra: valor, minimo y maximo
     float lo = 0.0f, hi = 1.0f;
@@ -531,11 +549,11 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             const int r = rowAt(io.MousePos.y, io.MousePos.x);
             if (r >= 0 && r == st.pressRow) {
                 res.clicked = r;
-                if (rows[r].kind == R_COLORS) {                      // cual de los 5 cuadros de color
+                if (rows[r].kind == R_COLORS) {                      // cual de los 6 cuadros de color (5 temas + personalizado)
                     const float rh = RowH(rows[r], u), sw = rh * 0.56f, g2 = 12.0f * u;
-                    const float cx0 = p0.x + rowW - 20.0f * u - (5.0f * sw + 4.0f * g2);
+                    const float cx0 = p0.x + rowW - 20.0f * u - (6.0f * sw + 5.0f * g2);
                     const int k = (int)floorf((io.MousePos.x - cx0 + g2 * 0.5f) / (sw + g2));
-                    res.sub = (k >= 0 && k < 5) ? k : -1;
+                    res.sub = (k >= 0 && k < 6) ? k : -1;
                 }
             }
         }
@@ -610,9 +628,19 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
         // elementos de la derecha
         if (r.kind == R_SWITCH) {
             const float w = 82.0f * u, sh = 42.0f * u, x = b.x - w - 20.0f * u, y = midY - sh * 0.5f;
-            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + sh), r.sw ? acc : IM_COL32(74, 76, 88, 255), sh * 0.5f);
-            dl->AddCircleFilled(ImVec2(r.sw ? x + w - sh * 0.5f : x + sh * 0.5f, midY), sh * 0.5f - 5.0f * u, white, 24);
-            reserve = w + 40.0f * u;
+            if (r.locked) {
+                // bloqueado: interruptor gris apagado con candado
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + sh), IM_COL32(50, 52, 60, 255), sh * 0.5f);
+                dl->AddCircleFilled(ImVec2(x + sh * 0.5f, midY), sh * 0.5f - 5.0f * u, IM_COL32(140, 142, 150, 255), 24);
+                const float lx = x - 34.0f * u, ly = midY;
+                dl->AddRectFilled(ImVec2(lx - 8.0f * u, ly - 2.0f * u), ImVec2(lx + 8.0f * u, ly + 10.0f * u), IM_COL32(160, 162, 170, 255), 3.0f * u);
+                dl->AddCircle(ImVec2(lx, ly - 2.0f * u), 6.0f * u, IM_COL32(160, 162, 170, 255), 12, 2.5f * u);
+                reserve = w + 80.0f * u;
+            } else {
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + sh), r.sw ? acc : IM_COL32(74, 76, 88, 255), sh * 0.5f);
+                dl->AddCircleFilled(ImVec2(r.sw ? x + w - sh * 0.5f : x + sh * 0.5f, midY), sh * 0.5f - 5.0f * u, white, 24);
+                reserve = w + 40.0f * u;
+            }
         } else if (r.kind == R_SKIN && !r.right.empty()) {            // marca + pastilla "PUESTA"
             ImVec2 ts = ImGui::CalcTextSize(r.right.c_str());
             const float padx = 16.0f * u, ph2 = ts.y + 14.0f * u, x1 = b.x - 18.0f * u, x0 = x1 - ts.x - padx * 2.0f;
@@ -632,13 +660,15 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             reserve = ts.x + 40.0f * u;
         } else if (r.kind == R_COLORS) {
             const float sw = h * 0.56f, g2 = 12.0f * u;
-            const float cx0 = b.x - 20.0f * u - (5.0f * sw + 4.0f * g2);
-            for (int k = 0; k < 5; k++) {
+            const float cx0 = b.x - 20.0f * u - (6.0f * sw + 5.0f * g2);
+            for (int k = 0; k < 6; k++) {
                 const ImVec2 sa(cx0 + k * (sw + g2), midY - sw * 0.5f), sb(sa.x + sw, sa.y + sw);
-                dl->AddRectFilled(sa, sb, ImGui::GetColorU32(kAccent[k]), sw * 0.3f);
-                if (k == g_theme) dl->AddRect(ImVec2(sa.x - 4.0f * u, sa.y - 4.0f * u), ImVec2(sb.x + 4.0f * u, sb.y + 4.0f * u), white, sw * 0.38f, 0, 3.0f * u);
+                // 5 temas + el 6o cuadro = color RGB personalizado
+                dl->AddRectFilled(sa, sb, ImGui::GetColorU32(k < 5 ? kAccent[k] : g_customCol), sw * 0.3f);
+                bool sel = (k < 5) ? (!g_useCustom && k == g_theme) : g_useCustom;
+                if (sel) dl->AddRect(ImVec2(sa.x - 4.0f * u, sa.y - 4.0f * u), ImVec2(sb.x + 4.0f * u, sb.y + 4.0f * u), white, sw * 0.38f, 0, 3.0f * u);
             }
-            reserve = 5.0f * sw + 4.0f * g2 + 40.0f * u;
+            reserve = 6.0f * sw + 5.0f * g2 + 40.0f * u;
         }
 
         if (r.kind == R_SLIDER) {                                    // etiqueta y % arriba, barra abajo
@@ -804,7 +834,7 @@ static void BuildUI(float W, float H, float u) {
         dl->AddText(fn, tfs, ImVec2(hp.x + hh + 16.0f * u, hp.y + 2.0f * u), IM_COL32(255, 255, 255, 255), pre.c_str());
         dl->AddText(fn, tfs, ImVec2(hp.x + hh + 16.0f * u + preTs.x, hp.y + 2.0f * u), ImGui::GetColorU32(pal.accent), suf.c_str());
     }
-    dl->AddText(fn, fs * 0.66f, ImVec2(hp.x + hh + 16.0f * u, hp.y + 40.0f * u), ImGui::GetColorU32(kGrey), "by Daniel AG");
+    dl->AddText(fn, fs * 0.66f, ImVec2(hp.x + hh + 16.0f * u, hp.y + 40.0f * u), ImGui::GetColorU32(kGrey), "by Hunter09");
     const float xr = 27.0f * u;                                       // boton cerrar (circulo oscuro con anillo morado y X)
     const ImVec2 xc(wp.x + psz.x - pad - xr, hp.y + hh * 0.5f);
     ImGui::SetCursorScreenPos(ImVec2(xc.x - xr, xc.y - xr));
@@ -865,10 +895,19 @@ static void BuildUI(float W, float H, float u) {
         section(K_SEC_GENERAL);
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_REMEMBER); r.action = 3; r.sw = snap.remember; rows.push_back(r); }
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_LOCK); r.action = 11; r.sw = g_btnLock; rows.push_back(r); }
+        section(K_SEC_COLOR);
+        { Row r; r.kind = R_COLORS; r.label = Tr(K_THEME) + ": " + (g_useCustom ? Tr(K_CUSTOM) : Loc(kThemeName[g_lang][g_theme])); r.action = 7; rows.push_back(r); }
+        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_R); r.action = 20; r.val = &g_customCol.x; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
+        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_G); r.action = 21; r.val = &g_customCol.y; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
+        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_B); r.action = 22; r.val = &g_customCol.z; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
+        { Row r; r.kind = R_ACTION; r.label = Tr(K_COLOR_RESET); r.action = 23; rows.push_back(r); }
         section(K_SEC_ZYZ);
-        { Row r; r.kind = R_SWITCH; r.label = Tr(K_ZYZ_ON); r.action = 15; r.sw = snap.zyzOn; rows.push_back(r); }
-        { Row r; r.kind = R_ACTION; r.label = Tr(K_RESCAN_ZYZ); r.action = 16; rows.push_back(r); }
-        { Row r; r.kind = R_INFO; char b[96]; snprintf(b, sizeof b, Tr(K_ZYZ_COUNT_FMT).c_str(), snap.zyzCount); r.label = b; rows.push_back(r); }
+        { Row r; r.kind = R_SWITCH; r.label = Tr(K_ZYZ_ON); r.action = 15; r.sw = snap.zyzOn; r.locked = !snap.zyzDetected; if (r.locked) r.col = kGrey; rows.push_back(r); }
+        if (!snap.zyzDetected) { Row r; r.kind = R_INFO; r.label = Tr(K_ZYZ_LOCKED); rows.push_back(r); }
+        else {
+            { Row r; r.kind = R_ACTION; r.label = Tr(K_RESCAN_ZYZ); r.action = 16; rows.push_back(r); }
+            { Row r; r.kind = R_INFO; char b[96]; snprintf(b, sizeof b, Tr(K_ZYZ_COUNT_FMT).c_str(), snap.zyzCount); r.label = b; rows.push_back(r); }
+        }
         section(K_SEC_LOADER);
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_LOADER_ON); r.action = 17; r.sw = snap.loaderOn; rows.push_back(r); }
         { Row r; r.kind = R_ACTION; r.label = Tr(K_RESCAN_LOADER); r.action = 18; rows.push_back(r); }
@@ -876,17 +915,17 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_INFO; r.label = Tr(K_LOADER_NOTE); rows.push_back(r); }
         section(K_SEC_LOOK);
         { Row r; r.kind = R_VALUE; r.label = Tr(K_LANG); r.right = Loc(kLangName[g_lang]); r.action = 5; rows.push_back(r); }
-        { Row r; r.kind = R_COLORS; r.label = Tr(K_THEME) + ": " + Loc(kThemeName[g_lang][g_theme]); r.action = 7; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.36-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.37-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
     if (lr.clicked >= 0) {
         const Row& r = rows[lr.clicked];
-        if (r.action == 1) core::Command(r.arg);
+        if (r.locked) { /* fila bloqueada (ZyZ sin instalar): no hace nada */ }
+        else if (r.action == 1) core::Command(r.arg);
         else if (r.action == 2) core::Command("CJ");
         else if (r.action == 3) core::Command(snap.remember ? "REMEMBER_OFF" : "REMEMBER_ON");
         else if (r.action == 4) core::Command("RESCAN");
@@ -895,10 +934,19 @@ static void BuildUI(float W, float H, float u) {
         else if (r.action == 17) core::Command(snap.loaderOn ? "LOADER_OFF" : "LOADER_ON");
         else if (r.action == 18) core::Command("RESCAN_LOADER");
         else if (r.action == 5) { g_lang = (g_lang + 1) % 3; SaveMenuSettings(); }
-        else if (r.action == 7 && lr.sub >= 0) { g_theme = lr.sub; SaveMenuSettings(); }
+        else if (r.action == 7 && lr.sub >= 0) {
+            if (lr.sub == 5) g_useCustom = true;   // 6o cuadro = color RGB personalizado
+            else { g_useCustom = false; g_theme = lr.sub; }
+            SaveMenuSettings();
+        }
         else if (r.action == 11) { g_btnLock = !g_btnLock; SaveMenuSettings(); }
+        else if (r.action == 23) { g_useCustom = false; g_theme = 0; SaveMenuSettings(); }   // volver al color ARCX
     }
-    if (lr.sliderReleased >= 0) SaveMenuSettings();
+    if (lr.sliderReleased >= 0) {
+        const Row& sr = rows[lr.sliderReleased];
+        if (sr.action >= 20 && sr.action <= 22) g_useCustom = true;   // mover R/G/B activa el color personalizado
+        SaveMenuSettings();
+    }
 
     // ---- pie: pista (izquierda), paginas si hacen falta y esquina para redimensionar ----
     const float footY = wp.y + psz.y - padY - footH;

@@ -4,13 +4,31 @@
 #pragma once
 #include "skinscan.h"
 #include "arcx_loader.h"
+#include <dlfcn.h>
 namespace core {
 
 static std::string g_root;   // .../files/modloader (ZyZ ModLoader)
 static std::string g_loaderRoot;   // .../files/ARCXLoader (cargador propio)
 static bool g_zyzOn = true;        // apartado ZyZ ModLoader activado (Ajustes)
 static bool g_loaderOn = true;     // apartado ARCXLoader activado (Ajustes)
+static bool g_zyzDetected = false; // ZyZ ModLoader instalado/cargado en el proceso (se detecta, no se supone)
 static int g_zyzCount = 0, g_loaderCount = 0, g_loaderPngs = 0;
+
+// ZyZ ModLoader esta instalado? Se busca su .so ya cargado en el proceso
+// (RTLD_NOLOAD no lo carga, solo lo busca) y, por si se cargo por ruta
+// completa, se busca su nombre en los mapas del proceso.
+static bool DetectZyZ() {
+    void* h = dlopen("libZyZModLoader64.so", RTLD_NOLOAD | RTLD_NOW);
+    if (h) return true;
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof line, f))
+        if (strstr(line, "ZyZModLoader")) { found = true; break; }
+    fclose(f);
+    return found;
+}
 
 static void Log(const char* fmt, ...) {
     va_list ap;
@@ -133,12 +151,13 @@ static std::vector<int> g_pubSkinSrc;   // origen por skin, en el mismo orden qu
 static std::string g_pubCur = "CJ", g_pubStatus, g_pubTitle = "PROJECT ARCX";
 static bool g_pubRemember = false;
 static bool g_pubZyzOn = true, g_pubLoaderOn = true;
+static bool g_pubZyzDetected = false;
 static int g_pubZyzCount = 0, g_pubLoaderCount = 0, g_pubLoaderPngs = 0;
 static std::string g_status;        // "agachado", "peleando"...: motivo de la espera; vacio = libre
 static std::string g_stateCur = "CJ";
 
 struct Snapshot { std::vector<std::string> skins; std::vector<int> skinSrc; std::string current, status, title; bool remember = false;
-                  bool zyzOn = true, loaderOn = true; int zyzCount = 0, loaderCount = 0, loaderPngs = 0; };
+                  bool zyzOn = true, loaderOn = true; bool zyzDetected = false; int zyzCount = 0, loaderCount = 0, loaderPngs = 0; };
 static void GetSnapshot(Snapshot& o) {
     std::lock_guard<std::mutex> lk(g_pubMtx);
     o.skins = g_pubSkins;
@@ -149,6 +168,7 @@ static void GetSnapshot(Snapshot& o) {
     o.remember = g_pubRemember;
     o.zyzOn = g_pubZyzOn;
     o.loaderOn = g_pubLoaderOn;
+    o.zyzDetected = g_pubZyzDetected;
     o.zyzCount = g_pubZyzCount;
     o.loaderCount = g_pubLoaderCount;
     o.loaderPngs = g_pubLoaderPngs;
@@ -159,6 +179,7 @@ static void PublishState() {
     g_pubStatus = g_status;
     g_pubZyzOn = g_zyzOn;
     g_pubLoaderOn = g_loaderOn;
+    g_pubZyzDetected = g_zyzDetected;
     g_pubZyzCount = g_zyzCount;
     g_pubLoaderCount = g_loaderCount;
     g_pubLoaderPngs = g_loaderPngs;
@@ -205,11 +226,23 @@ static void LoadSettings() {
         vsa::CfgUpdate([](vsa::Ini& i) { i["General"]["zyz"] = "1"; i["General"]["loader"] = "1"; i["General"]["srcfix"] = "1"; });
         Log("apartados ZyZ y ARCXLoader encendidos (migracion unica 3.1.4)");
     }
+    // El plugin ya no depende de ZyZ: se detecta si esta instalado. Sin ZyZ,
+    // su apartado se apaga y solo queda ARCXLoader. Los apartados son
+    // excluyentes: si los dos quedaron en ON (INI viejo), se queda ARCXLoader.
+    g_zyzDetected = DetectZyZ();
+    if (!g_zyzDetected) {
+        if (g_zyzOn) Log("ZyZ ModLoader no detectado: su apartado se apaga, solo queda ARCXLoader");
+        g_zyzOn = false; g_loaderOn = true;
+    } else if (g_zyzOn && g_loaderOn) {
+        g_zyzOn = false;
+        Log("apartados excluyentes: se queda ARCXLoader (ZyZ se puede activar en Ajustes)");
+    }
     std::lock_guard<std::mutex> lk(g_pubMtx);
     g_pubRemember = g_remember;
     g_pubTitle = g_title;
     g_pubZyzOn = g_zyzOn;        // si no se publican aqui, la interfaz arranca
     g_pubLoaderOn = g_loaderOn;  // mostrando los dos apartados en ON aunque el INI diga OFF
+    g_pubZyzDetected = g_zyzDetected;
 }
 // marca la skin que se esta aplicando: si el juego se cierra en medio, al arrancar se avisa en el log
 static void MarkApplying(const std::string& n) { vsa::CfgUpdate([&](vsa::Ini& ini) { ini["Debug"]["applying"] = n; }); }
@@ -244,8 +277,11 @@ static bool g_firstScan = true;
 
 static void StartScan() {
     if (g_scanBusy.exchange(true)) return;
+    // se vuelve a detectar ZyZ en cada busqueda: si se instalo despues, su apartado se desbloquea
+    g_zyzDetected = DetectZyZ();
+    { std::lock_guard<std::mutex> lk(g_pubMtx); g_pubZyzDetected = g_zyzDetected; }
     const std::string root = g_root, loaderRoot = g_loaderRoot;
-    const bool zyzOn = g_zyzOn, loaderOn = g_loaderOn;
+    const bool zyzOn = g_zyzOn && g_zyzDetected, loaderOn = g_loaderOn;   // sin ZyZ, modloader/ no se lista (esas skins no se podrian aplicar)
     std::thread([root, loaderRoot, zyzOn, loaderOn]() {
         std::vector<skinscan::Skin> out;
         std::vector<std::string> rej;
@@ -710,7 +746,12 @@ static void ProcessCommand() {
         return;
     }
     if (l == "zyz_on" || l == "zyz_off") {
+        if (l == "zyz_on" && !g_zyzDetected) {
+            LOGI("ZyZ ModLoader no detectado: instala el plugin ZyZ ModLoader para usar esta funcion");
+            return;
+        }
         g_zyzOn = (l == "zyz_on");
+        if (g_zyzOn) { g_loaderOn = false; loader::Rebuild(std::vector<skinscan::Skin>{}); }   // excluyente: al activar ZyZ se apaga ARCXLoader
         SaveSettings();
         LOGI("apartado ZyZ ModLoader: %s", g_zyzOn ? "SI" : "NO");
         StartScan();
@@ -718,6 +759,7 @@ static void ProcessCommand() {
     }
     if (l == "loader_on" || l == "loader_off") {
         g_loaderOn = (l == "loader_on");
+        if (g_loaderOn) g_zyzOn = false;   // excluyente: al activar ARCXLoader se apaga ZyZ
         SaveSettings();
         LOGI("apartado ARCXLoader (propio): %s", g_loaderOn ? "SI" : "NO");
         if (!g_loaderOn) loader::Rebuild(std::vector<skinscan::Skin>{});   // tabla vacia: nada se redirige
