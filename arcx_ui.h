@@ -727,8 +727,21 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             const float cx0 = b.x - 20.0f * u - (6.0f * sw + 5.0f * g2);
             for (int k = 0; k < 6; k++) {
                 const ImVec2 sa(cx0 + k * (sw + g2), midY - sw * 0.5f), sb(sa.x + sw, sa.y + sw);
-                // 5 temas + el 6o cuadro = color RGB personalizado
-                dl->AddRectFilled(sa, sb, ImGui::GetColorU32(k < 5 ? kAccent[k] : g_customCol), sw * 0.3f);
+                if (k < 5) {
+                    dl->AddRectFilled(sa, sb, ImGui::GetColorU32(kAccent[k]), sw * 0.3f);
+                } else {
+                    // 6o cuadro = color personalizado: arcoiris (todos los
+                    // colores en franjas), no el color actual, para que se
+                    // vea que ahi esta el panel selector de colores
+                    const int n = 8;
+                    for (int s = 0; s < n; s++) {
+                        float rr, gg, bb;
+                        ImGui::ColorConvertHSVtoRGB((float)s / (float)n, 1.0f, 1.0f, rr, gg, bb);
+                        dl->AddRectFilled(ImVec2(sa.x + (float)s * sw / (float)n, sa.y),
+                            ImVec2(sa.x + (float)(s + 1) * sw / (float)n + 0.5f, sb.y),
+                            IM_COL32((int)(rr * 255.0f), (int)(gg * 255.0f), (int)(bb * 255.0f), 255));
+                    }
+                }
                 bool sel = (k < 5) ? (!g_useCustom && k == g_theme) : g_useCustom;
                 if (sel) dl->AddRect(ImVec2(sa.x - 4.0f * u, sa.y - 4.0f * u), ImVec2(sb.x + 4.0f * u, sb.y + 4.0f * u), white, sw * 0.38f, 0, 3.0f * u);
             }
@@ -996,8 +1009,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_LOCK); r.action = 11; r.sw = g_btnLock; rows.push_back(r); }
         section(K_SEC_COLOR);
         { Row r; r.kind = R_COLORS; r.label = Tr(K_THEME) + ": " + (g_useCustom ? Tr(K_CUSTOM) : Loc(kThemeName[g_lang][g_theme])); r.action = 7; rows.push_back(r); }
-        { Row r; r.kind = R_PICKER; r.label = ""; r.action = 24; rows.push_back(r); }   // panel selector de color (3.1.38): cuadro SV + barra de tono + RGB/hex, en vez de las 3 barras simples
-        { Row r; r.kind = R_ACTION; r.label = Tr(K_COLOR_RESET); r.action = 23; rows.push_back(r); }
+        if (g_useCustom) { Row r; r.kind = R_PICKER; r.label = ""; r.action = 24; rows.push_back(r); }   // el panel solo aparece al elegir el cuadro arcoiris (color personalizado); con un predeterminado se oculta (3.1.39)
         section(K_SEC_ZYZ);
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_ZYZ_ON); r.action = 15; r.sw = snap.zyzOn; r.locked = !snap.zyzDetected; if (r.locked) r.col = kGrey; rows.push_back(r); }
         if (!snap.zyzDetected) { Row r; r.kind = R_INFO; r.label = Tr(K_ZYZ_LOCKED); rows.push_back(r); }
@@ -1015,7 +1027,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.38-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.39-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
@@ -1037,7 +1049,6 @@ static void BuildUI(float W, float H, float u) {
             SaveMenuSettings();
         }
         else if (r.action == 11) { g_btnLock = !g_btnLock; SaveMenuSettings(); }
-        else if (r.action == 23) { g_useCustom = false; g_theme = 0; SaveMenuSettings(); }   // volver al color ARCX
     }
     if (lr.sliderReleased >= 0) {
         // soltar una barra o el selector de color guarda los ajustes (el
