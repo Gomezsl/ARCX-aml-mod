@@ -445,7 +445,7 @@ static bool ArrowBtn(const char* id, int dir, float w, float h, bool enabled, fl
 }
 
 // ---- lista deslizable ----------------------------------------------------------------------------------
-enum { R_ACTION, R_SKIN, R_SWITCH, R_VALUE, R_COLORS, R_SLIDER, R_SECTION, R_INFO, R_CJ };
+enum { R_ACTION, R_SKIN, R_SWITCH, R_VALUE, R_COLORS, R_SLIDER, R_SECTION, R_INFO, R_CJ, R_PICKER };
 struct Row {
     int kind = R_ACTION;
     std::string label, right;
@@ -464,6 +464,8 @@ struct ListState {
     float scroll = 0.0f, vel = 0.0f, pressScroll = 0.0f;
     bool down = false, dragging = false, onSlider = false;
     int pressRow = -1, sliderRow = -1;
+    bool onPicker = false;              // se esta arrastrando el selector de color
+    int pickerRow = -1, pickerZone = 0; // 1 = cuadro saturacion/valor, 2 = barra de tono
     ImVec2 pressPos;
 };
 struct ListResult { int clicked = -1; int sub = -1; int sliderReleased = -1; };
@@ -473,6 +475,7 @@ static float RowH(const Row& r, float u) {
     switch (r.kind) {
         case R_SECTION: return 44.0f * u;
         case R_SLIDER: return 98.0f * u;
+        case R_PICKER: return 320.0f * u;   // panel selector de color: cuadro SV + barra de tono + valores
         case R_INFO: return 46.0f * u;
         case R_CJ: return 48.0f * u;                    // "Volver a ser CJ": solo texto rosa con barra
         case R_SKIN: return r.sub.empty() ? 64.0f * u : 88.0f * u;   // con subtitulo de origen, la fila es mas alta
@@ -488,6 +491,22 @@ static ImU32 AvatarColor(const std::string& name) {
     float r, g, b;
     ImGui::ColorConvertHSVtoRGB((float)(Hash32(name) % 360) / 360.0f, 0.55f, 0.82f, r, g, b);
     return IM_COL32((int)(r * 255.0f), (int)(g * 255.0f), (int)(b * 255.0f), 255);
+}
+
+// ---- selector de color (3.1.38) ---------------------------------------------------------------
+// El color personalizado se guarda en RGB (g_customCol), pero el panel trabaja
+// en HSV: el cuadro grande es saturacion (X) / valor (Y) para el tono actual,
+// y la barra vertical es el tono. El HSV se guarda aparte para no perder
+// precision convirtiendo RGB->HSV en cada frame; cuando no se esta arrastrando
+// el panel, se sincroniza desde g_customCol (asi refleja tambien los cambios
+// hechos desde los cuadros de tema o el boton de restablecer).
+static float g_pickH = 0.75f, g_pickS = 0.68f, g_pickV = 1.0f;
+static void PickerSyncFromRGB() { ImGui::ColorConvertRGBtoHSV(g_customCol.x, g_customCol.y, g_customCol.z, g_pickH, g_pickS, g_pickV); }
+static void PickerApplyToRGB() {
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(g_pickH, g_pickS, g_pickV, r, g, b);
+    g_customCol.x = r; g_customCol.y = g; g_customCol.z = b;
+    g_useCustom = true;   // tocar el panel activa el color personalizado
 }
 
 // Dibuja una lista que se desliza con el dedo (con inercia). Toque corto = fila pulsada; arrastre = scroll; las barras se mueven en horizontal.
@@ -520,20 +539,63 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
     auto trackX0 = [&]() { return p0.x + 32.0f * u; };
     auto trackX1 = [&]() { return p0.x + rowW - 32.0f * u; };
 
+    // Geometria del panel de color de una fila R_PICKER (cuadro SV + barra de
+    // tono + fila de valores). Se usa igual al dibujar y al tocar, para que
+    // el dedo caiga donde se ve el color.
+    auto pickerGeom = [&](int ri, ImVec2& sq0, float& sq, ImVec2& hue0, float& hueW, ImVec2& read0, float& readH) {
+        const float y0 = p0.y + ys[ri] - st.scroll;
+        const float pad = 14.0f * u;
+        readH = 44.0f * u;
+        sq = RowH(rows[ri], u) - pad * 2.0f - readH - 10.0f * u;
+        sq0 = ImVec2(p0.x + pad, y0 + pad);
+        hueW = 30.0f * u;
+        hue0 = ImVec2(sq0.x + sq + 12.0f * u, sq0.y);
+        read0 = ImVec2(p0.x + pad, sq0.y + sq + 10.0f * u);
+    };
+
     // ---- entrada tactil ----
     const bool inView = io.MousePos.x >= p0.x && io.MousePos.x <= p0.x + size.x && io.MousePos.y >= p0.y && io.MousePos.y <= p0.y + size.y;
     if (io.MouseClicked[0] && inView) {
-        st.down = true; st.dragging = false; st.vel = 0.0f; st.onSlider = false;
+        st.down = true; st.dragging = false; st.vel = 0.0f; st.onSlider = false; st.onPicker = false;
         st.pressPos = io.MousePos; st.pressScroll = st.scroll;
         st.pressRow = rowAt(io.MousePos.y, io.MousePos.x);
         if (st.pressRow >= 0 && rows[st.pressRow].kind == R_SLIDER) {
             const float y0 = p0.y + ys[st.pressRow] - st.scroll;
             if (io.MousePos.y > y0 + RowH(rows[st.pressRow], u) * 0.34f) { st.onSlider = true; st.sliderRow = st.pressRow; }
         }
+        if (st.pressRow >= 0 && rows[st.pressRow].kind == R_PICKER) {
+            // tocar el cuadro SV cambia saturacion/valor; tocar la barra de
+            // tono cambia el tono. Tocar la fila de valores no hace nada
+            // (ahi la lista se desliza normal).
+            ImVec2 sq0, hue0, read0; float sq, hueW, readH;
+            pickerGeom(st.pressRow, sq0, sq, hue0, hueW, read0, readH);
+            const ImVec2 mp = io.MousePos;
+            PickerSyncFromRGB();   // por si el color cambio desde fuera del panel
+            if (mp.x >= sq0.x && mp.x <= sq0.x + sq && mp.y >= sq0.y && mp.y <= sq0.y + sq) {
+                st.onPicker = true; st.pickerRow = st.pressRow; st.pickerZone = 1;
+                g_pickS = Clampf((mp.x - sq0.x) / sq, 0.0f, 1.0f);
+                g_pickV = Clampf(1.0f - (mp.y - sq0.y) / sq, 0.0f, 1.0f);
+                PickerApplyToRGB();
+            } else if (mp.x >= hue0.x && mp.x <= hue0.x + hueW && mp.y >= hue0.y && mp.y <= hue0.y + sq) {
+                st.onPicker = true; st.pickerRow = st.pressRow; st.pickerZone = 2;
+                g_pickH = Clampf((mp.y - hue0.y) / sq, 0.0f, 1.0f);
+                PickerApplyToRGB();
+            }
+        }
     }
     const bool released = st.down && io.MouseReleased[0];
     if (st.down && !released && io.MouseDown[0]) {
-        if (st.onSlider) {
+        if (st.onPicker) {
+            ImVec2 sq0, hue0, read0; float sq, hueW, readH;
+            pickerGeom(st.pickerRow, sq0, sq, hue0, hueW, read0, readH);
+            if (st.pickerZone == 1) {
+                g_pickS = Clampf((io.MousePos.x - sq0.x) / sq, 0.0f, 1.0f);
+                g_pickV = Clampf(1.0f - (io.MousePos.y - sq0.y) / sq, 0.0f, 1.0f);
+            } else if (st.pickerZone == 2) {
+                g_pickH = Clampf((io.MousePos.y - hue0.y) / sq, 0.0f, 1.0f);
+            }
+            PickerApplyToRGB();
+        } else if (st.onSlider) {
             Row& r = rows[st.sliderRow];
             if (r.val) *r.val = r.lo + Clampf((io.MousePos.x - trackX0()) / (trackX1() - trackX0()), 0.0f, 1.0f) * (r.hi - r.lo);
         } else {
@@ -544,7 +606,8 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
     }
     if (released) {
         st.down = false;
-        if (st.onSlider) res.sliderReleased = st.sliderRow;
+        if (st.onPicker) res.sliderReleased = st.pickerRow;
+        else if (st.onSlider) res.sliderReleased = st.sliderRow;
         else if (!st.dragging) {
             const int r = rowAt(io.MousePos.y, io.MousePos.x);
             if (r >= 0 && r == st.pressRow) {
@@ -558,6 +621,7 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             }
         }
         st.onSlider = false;
+        st.onPicker = false;
     }
     if (!st.down) {                                                  // inercia al soltar
         st.scroll += st.vel;
@@ -582,7 +646,7 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
         if (y0 + h < p0.y || y0 > p0.y + size.y) continue;
         const ImVec2 a(p0.x, y0), b(p0.x + rowW, y0 + h);
         const float midY = y0 + h * 0.5f;
-        const bool pressed = st.down && !st.dragging && !st.onSlider && st.pressRow == (int)i;
+        const bool pressed = st.down && !st.dragging && !st.onSlider && !st.onPicker && st.pressRow == (int)i;
 
         if (r.kind == R_SECTION) {
             const float sfs = fs * 0.72f;
@@ -683,6 +747,41 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             dl->AddRectFilled(ImVec2(x0, ty - 4.0f * u), ImVec2(kx, ty + 4.0f * u), acc, 4.0f * u);
             dl->AddCircleFilled(ImVec2(kx, ty), 16.0f * u, white, 24);
             dl->AddCircle(ImVec2(kx, ty), 16.0f * u, acc, 24, 3.0f * u);
+        } else if (r.kind == R_PICKER) {                            // panel selector de color: cuadro SV + barra de tono + valores
+            if (!st.onPicker) PickerSyncFromRGB();
+            ImVec2 sq0, hue0, read0; float sq, hueW, readH;
+            pickerGeom((int)i, sq0, sq, hue0, hueW, read0, readH);
+            // cuadro saturacion/valor: arriba blanco -> color del tono
+            // (saturacion), abajo negro (valor)
+            float hr, hg, hb;
+            ImGui::ColorConvertHSVtoRGB(g_pickH, 1.0f, 1.0f, hr, hg, hb);
+            const ImU32 hueCol = IM_COL32((int)(hr * 255.0f), (int)(hg * 255.0f), (int)(hb * 255.0f), 255);
+            dl->AddRectFilledMultiColor(sq0, ImVec2(sq0.x + sq, sq0.y + sq),
+                IM_COL32(255, 255, 255, 255), hueCol, IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255));
+            dl->AddRect(sq0, ImVec2(sq0.x + sq, sq0.y + sq), IM_COL32(255, 255, 255, 60), 6.0f * u, 0, 1.5f * u);
+            const ImVec2 mk(sq0.x + g_pickS * sq, sq0.y + (1.0f - g_pickV) * sq);
+            dl->AddCircleFilled(mk, 11.0f * u, ImGui::GetColorU32(g_customCol), 24);
+            dl->AddCircle(mk, 11.0f * u, white, 24, 3.0f * u);
+            // barra de tono: 24 franjas del arcoiris
+            const float seg = sq / 24.0f;
+            for (int k = 0; k < 24; k++) {
+                float rr, gg, bb;
+                ImGui::ColorConvertHSVtoRGB((float)k / 24.0f, 1.0f, 1.0f, rr, gg, bb);
+                dl->AddRectFilled(ImVec2(hue0.x, hue0.y + k * seg), ImVec2(hue0.x + hueW, hue0.y + (k + 1) * seg + 0.5f),
+                    IM_COL32((int)(rr * 255.0f), (int)(gg * 255.0f), (int)(bb * 255.0f), 255));
+            }
+            dl->AddRect(hue0, ImVec2(hue0.x + hueW, hue0.y + sq), IM_COL32(255, 255, 255, 60), 6.0f * u, 0, 1.5f * u);
+            const float hy = hue0.y + g_pickH * sq;
+            dl->AddLine(ImVec2(hue0.x - 4.0f * u, hy), ImVec2(hue0.x + hueW + 4.0f * u, hy), white, 3.0f * u);
+            // abajo: muestra del color + valores RGB y hexadecimal
+            const ImVec2 sw0(read0.x, read0.y + 2.0f * u), sw1(read0.x + 40.0f * u, read0.y + readH - 2.0f * u);
+            dl->AddRectFilled(sw0, sw1, ImGui::GetColorU32(g_customCol), 8.0f * u);
+            dl->AddRect(sw0, sw1, white, 8.0f * u, 0, 2.0f * u);
+            char vals[64];
+            const int cr = (int)(g_customCol.x * 255.0f + 0.5f), cg = (int)(g_customCol.y * 255.0f + 0.5f), cb = (int)(g_customCol.z * 255.0f + 0.5f);
+            snprintf(vals, sizeof vals, "R %d   G %d   B %d    #%02X%02X%02X", cr, cg, cb, cr, cg, cb);
+            ImVec2 vts = ImGui::CalcTextSize(vals);
+            dl->AddText(ImVec2(sw1.x + 16.0f * u, read0.y + (readH - vts.y) * 0.5f), white, vals);
         } else {
             dl->PushClipRect(a, ImVec2(b.x - reserve, b.y), true);
             if (r.kind == R_SKIN && !r.sub.empty()) {
@@ -897,9 +996,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_LOCK); r.action = 11; r.sw = g_btnLock; rows.push_back(r); }
         section(K_SEC_COLOR);
         { Row r; r.kind = R_COLORS; r.label = Tr(K_THEME) + ": " + (g_useCustom ? Tr(K_CUSTOM) : Loc(kThemeName[g_lang][g_theme])); r.action = 7; rows.push_back(r); }
-        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_R); r.action = 20; r.val = &g_customCol.x; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
-        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_G); r.action = 21; r.val = &g_customCol.y; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
-        { Row r; r.kind = R_SLIDER; r.label = Tr(K_RGB_B); r.action = 22; r.val = &g_customCol.z; r.lo = 0.0f; r.hi = 1.0f; rows.push_back(r); }
+        { Row r; r.kind = R_PICKER; r.label = ""; r.action = 24; rows.push_back(r); }   // panel selector de color (3.1.38): cuadro SV + barra de tono + RGB/hex, en vez de las 3 barras simples
         { Row r; r.kind = R_ACTION; r.label = Tr(K_COLOR_RESET); r.action = 23; rows.push_back(r); }
         section(K_SEC_ZYZ);
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_ZYZ_ON); r.action = 15; r.sw = snap.zyzOn; r.locked = !snap.zyzDetected; if (r.locked) r.col = kGrey; rows.push_back(r); }
@@ -918,7 +1015,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.37-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.38-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
@@ -943,8 +1040,8 @@ static void BuildUI(float W, float H, float u) {
         else if (r.action == 23) { g_useCustom = false; g_theme = 0; SaveMenuSettings(); }   // volver al color ARCX
     }
     if (lr.sliderReleased >= 0) {
-        const Row& sr = rows[lr.sliderReleased];
-        if (sr.action >= 20 && sr.action <= 22) g_useCustom = true;   // mover R/G/B activa el color personalizado
+        // soltar una barra o el selector de color guarda los ajustes (el
+        // selector ya activo el color personalizado mientras se arrastraba)
         SaveMenuSettings();
     }
 

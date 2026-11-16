@@ -665,6 +665,76 @@ static void* GetTxdEntriesBase() {
     return entries;
 }
 
+// ---- registro de TextureDatabaseRuntime del juego (3.1.38) -----------------
+// El juego guarda los .txd cargados en un registro (TDBArray de punteros a
+// TextureDatabaseRuntime; global 0x851cf8 en 2.10: capacidad+0, count+4,
+// array+8). RwTextureRead llama primero a TextureDatabaseRuntime::GetTexture
+// y ESTA NO COMPRUEBA NULOS: recorre el array y lee +0x110 de cada entrada
+// (el numero de cubetas del hash). Si una entrada es NULL, el juego se cierra
+// con SIGSEGV en GetTexture+0x68 (fault 0x110). Eso es justo lo que pasaba al
+// elegir una skin de ARCXLoader sin ZyZ ModLoader instalado (crashlog
+// 2026-11-16 01:16, pid 21116: GetTexture <- RwTextureRead <- hook de ARCX,
+// sin libZyZModLoader64.so cargado). Register/Unregister del juego mantienen
+// el array compacto, asi que una entrada NULL es un resto que nunca se
+// deberia usar: se quita compactando el array (igual que hace Unregister) y
+// el juego vuelve a poder buscar texturas. Se localiza el global escaneando
+// el codigo de GetTexture (adrp + ldr #0xcf8), como se hace con los demas
+// globales del juego.
+static uintptr_t g_txdRegistryGlobal = 0;   // puntero al TDBArray del registro
+static uintptr_t FindTxdRegistryGlobal(void* getTextureFn) {
+    if (!getTextureFn) return 0;
+    const uint32_t* code = (const uint32_t*)getTextureFn;
+    const uintptr_t base = (uintptr_t)getTextureFn;
+    for (int i = 0; i < 0x10; i++) {   // GetTexture mide mas de 64 bytes
+        uint32_t w = code[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;   // adrp
+        int32_t imm = (int32_t)(((w >> 5) & 0x7FFFF) << 2) | (int32_t)((w >> 29) & 0x3);
+        if (imm & 0x100000) imm -= 0x200000;
+        uintptr_t page = (base + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF;
+        uintptr_t target = page + ((uintptr_t)imm << 12);
+        int rd = (int)(w & 0x1F);
+        for (int j = 1; j <= 4; j++) {
+            uint32_t w2 = code[i + j];
+            if ((w2 & 0xFFC00000u) != 0xF9400000u) continue;   // ldr (offset sin signo, 64 bits)
+            uint32_t imm12 = (w2 >> 10) & 0xFFF;
+            int rn = (int)((w2 >> 5) & 0x1F);
+            if (imm12 * 8 == 0xcf8 && rn == rd) return target + 0xcf8;   // global 0x851cf8
+        }
+    }
+    Log("no se pudo localizar el registro de TextureDatabaseRuntime en el codigo de GetTexture: el cierre al elegir skins sin ZyZ no se podra evitar");
+    return 0;
+}
+static void InitTxdRegistry(void* getTextureFn) {
+    g_txdRegistryGlobal = FindTxdRegistryGlobal(getTextureFn);
+    if (g_txdRegistryGlobal) Log("registro de TextureDatabaseRuntime localizado en %p (global %p)", *(void**)g_txdRegistryGlobal, (void*)g_txdRegistryGlobal);
+}
+// Quita las entradas NULL del registro de texturas del juego, compactandolo.
+// Devuelve cuantas quito, 0 si no habia ninguna, -1 si no se pudo localizar
+// el registro o sus datos no son creibles. Es barato (el registro tiene
+// pocas decenas de entradas) y se puede llamar antes de cada RwTextureRead
+// original: si hay una entrada vacia, llamar al original cerraria el juego.
+static int ScrubTxdRegistry() {
+    if (!g_txdRegistryGlobal) return -1;
+    void* reg = *(void**)g_txdRegistryGlobal;
+    if (!reg) return -1;
+    uint32_t cap = *(uint32_t*)reg;
+    uint32_t count = *(uint32_t*)((char*)reg + 4);
+    void** arr = *(void***)((char*)reg + 8);
+    if (!arr || count > 4096 || cap < count || cap > 65536) return -1;
+    int removed = 0;
+    uint32_t w = 0;
+    for (uint32_t r = 0; r < count; r++) {
+        if (arr[r]) { if (w != r) arr[w] = arr[r]; w++; }
+        else removed++;
+    }
+    if (removed) {
+        *(uint32_t*)((char*)reg + 4) = w;
+        static bool logged = false;
+        if (!logged) { logged = true; Log("registro de texturas del juego: se quitaron %d entrada(s) vacia(s) de %u (una entrada vacia cerraba el juego en GetTexture)", removed, count); }
+    }
+    return removed;
+}
+
 // Guarda las funciones de RenderWare para la carga directa del .txd (3.1.19)
 // y localiza el global con la tabla del CTxdStore.
 static void InitDirectTxd(void* rwStreamOpen, void* rwTexDictionaryStreamRead, void* rwStreamClose, void* txdAddRef, void* rwTexDictionaryGtaStreamRead) {
@@ -752,6 +822,7 @@ static bool LoadTxdDirect(const char* name, void* data, size_t dataSize) {
     g_txdAddRef(txdSlot);    // que el juego no lo descargue en medio de la partida
     g_txdBuffers.push_back(data);   // el buffer se queda: el diccionario puede referenciarlo
     Log("  txd de '%s' CARGADO directo (hueco %d, diccionario %p): sus texturas ya estan en el juego", name, txdSlot, dict);
+    ScrubTxdRegistry();   // 3.1.38: por si registrar el .txd dejo una entrada vacia en el registro de texturas
     return true;
 }
 
@@ -1191,6 +1262,7 @@ static int LoadTxdViaSoftware(const char* name, const uint8_t* data, size_t data
         if (!*(void**)entry) { *(void**)entry = dict; g_txdAddRef(txdSlot); }
     }
     Log("  TXD '%s' decodificado por software: %d textura(s) cargadas (hueco %d)", name, ok, txdSlot);
+    ScrubTxdRegistry();   // 3.1.38: por si registrar el .txd dejo una entrada vacia en el registro de texturas
     return ok;
 }
 
@@ -1385,6 +1457,7 @@ static int LoadPngForSkins(const std::vector<skinscan::Skin>& skins, int frame) 
         AuditDffTextures(s);   // 3.1.28: ahora que sus PNG/JPG estan en cache, se comprueba que el .dff no pida nada que falte
         done++;
     }
+    ScrubTxdRegistry();   // 3.1.38: por si registrar los .txd/PNG dejo una entrada vacia en el registro de texturas
     return done;
 }
 

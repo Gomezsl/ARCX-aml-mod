@@ -71,6 +71,7 @@ static void* (*RwTexDictionaryAddTexture)(void*, void*);  // RwTexDictionaryAddT
 static void  (*RwImageDestroy)(void*);                    // RwImageDestroy (opcional: libera una RwImage; 3.1.20)
 static void  (*RwRasterDestroy)(void*);                   // RwRasterDestroy (opcional: libera un RwRaster; 3.1.20)
 static void* (*RwTextureRead)(const char*, const char*);  // RwTextureRead (opcional: lee una textura por nombre del diccionario actual; 3.1.22: se engancha para devolver nuestras PNG)
+static void* (*GetTexture)(const char*);                 // TextureDatabaseRuntime::GetTexture (opcional: 3.1.38, solo para localizar su registro de .txd y limpiarlo)
 static void* (*RwTextureRead_orig)(const char*, const char*); // RwTextureRead original (para llamarlo cuando el nombre no es una PNG nuestra)
 static uint64_t (*CFileMgrOpenFile)(const char*, const char*); // CFileMgr::OpenFile (opcional: probar con que ruta abre el juego el IMG propio; 0 = no abre)
 static void  (*CFileMgrCloseFile)(uint64_t);              // CFileMgr::CloseFile (opcional)
@@ -956,6 +957,14 @@ static void CGame_Process_hook() {
 // (3.1.32) en vez de null: con null el material salia negro/oscuro, y eso
 // tapaba el chaleco de Ghost con la ropa oscura de CJ ('vest'/'jeans').
 static void* RwTextureRead_hook(const char* name, const char* mask) {
+    // 3.1.38: antes de llamar al original, se quitan las entradas vacias del
+    // registro de texturas del juego. Sin eso, el original se cerraba con
+    // SIGSEGV en GetTexture+0x68 (fault 0x110) al elegir una skin de
+    // ARCXLoader sin ZyZ ModLoader instalado: GetTexture recorre el registro
+    // sin comprobar nulos y lee +0x110 de cada entrada. La limpieza es
+    // barata (pocas decenas de punteros) y es lo mismo que hace el juego al
+    // descargar un .txd (Unregister compacta el array).
+    loader::ScrubTxdRegistry();
     // 3.1.29: primero el original (diccionario nativo, como ZyZ). Si lo
     // encuentra, esa es la textura correcta del modelo.
     void* native = (name && *name) ? RwTextureRead_orig(name, mask) : nullptr;
@@ -1061,6 +1070,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     SYM(RwImageDestroy,                    "_Z14RwImageDestroyP7RwImage");           // opcional: libera una RwImage (3.1.20)
     SYM(RwRasterDestroy,                   "_Z15RwRasterDestroyP8RwRaster");         // opcional: libera un RwRaster (3.1.20)
     SYM(RwTextureRead,                     "_Z13RwTextureReadPKcS0_");              // opcional: lee una textura por nombre del diccionario actual (3.1.22: se engancha para devolver nuestras PNG)
+    SYM(GetTexture,                        "_ZN22TextureDatabaseRuntime10GetTextureEPKc"); // opcional: busca una textura en el registro de .txd del juego (3.1.38: solo se usa su direccion para localizar el registro)
     // LoadCdDirectory NO se llama nunca en partida (en 3.1.7 se cerro el juego
     // dentro de GetEntry): solo se usa su direccion para localizar el objeto
     // CDirectory y el array CStreamingInfo escaneando su codigo.
@@ -1068,6 +1078,7 @@ inline void Init(const std::string& modloaderPath, const std::string& loaderPath
     LOGI("  %s _ZN10CStreaming15LoadCdDirectoryEPKci (solo para localizar el CDirectory; nunca se llama en partida)", loadCdDirFn ? "ok     " : "FALTA  ");
     loader::InitCdDirectory(loadCdDirFn, CdDirAddItem, CdDirFindItem);
     loader::InitTxd(loadCdDirFn, TxdFindSlot, TxdAddSlot, InfoSetCdPosnAndSize, RequestModel);
+    loader::InitTxdRegistry((void*)GetTexture);   // 3.1.38: localiza el registro de texturas del juego para limpiarlo de entradas vacias
     loader::InitQueue((void*)RequestModel);   // localiza la cabeza de la cola de peticiones (3.1.14: para meter los .txd en la cola)
     loader::InitDirectTxd((void*)RwStreamOpen, (void*)RwTexDictionaryStreamRead, (void*)RwStreamClose, (void*)TxdAddRef, (void*)RwTexDictionaryGtaStreamRead);   // carga directa del .txd con RenderWare (3.1.19, 3.1.33: lector de GTA primero)
     loader::InitPng((void*)RtPngImageRead, (void*)RwImageFindRasterFormat, (void*)RwRasterCreate, (void*)RwRasterSetFromImage, (void*)RwTextureCreate, (void*)RwTextureSetName, (void*)RwTexDictionaryCreate, (void*)RwTexDictionaryAddTexture, (void*)RwImageDestroy, (void*)RwRasterDestroy);   // texturas PNG directas, sin .txd (3.1.20, como CustomCharacter)
