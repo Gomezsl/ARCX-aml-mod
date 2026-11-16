@@ -914,7 +914,21 @@ static void* RwTextureRead_hook(const char* name, const char* mask) {
     // 3.1.29: primero el original (diccionario nativo, como ZyZ). Si lo
     // encuentra, esa es la textura correcta del modelo.
     void* native = (name && *name) ? RwTextureRead_orig(name, mask) : nullptr;
-    if (native) return native;
+    if (native) {
+        // 3.1.34 (la otra IA): si el original devuelve una textura Y ese
+        // nombre tambien esta en nuestra cache, gana la del juego y la
+        // nuestra queda tapada. Se registra una vez por nombre para ver si
+        // alguna textura propia choca con una del juego (p. ej. 'skin',
+        // 'hair', 'head') y por eso se ve gris o con otra textura.
+        if (name && *name && loader::FindPngTexture(name)) {
+            static std::map<std::string, bool> s_colLogged;
+            if (s_colLogged.find(name) == s_colLogged.end()) {
+                s_colLogged[name] = true;
+                LOGI("RwTextureRead: COLISION de nombre '%s': el original la tiene y tambien esta en nuestras PNG (gana la del juego)", name);
+            }
+        }
+        return native;
+    }
     if (name && *name) {
         void* tex = loader::FindPngTexture(name);
         if (tex) {

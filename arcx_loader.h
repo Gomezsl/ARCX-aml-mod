@@ -858,7 +858,15 @@ static void* LoadPngTexture(const std::string& path, const std::string& texName)
     // alfa se pierde al copiar la imagen al raster. Con este log se ve por textura
     // si el formato tiene alfa o no, sin adivinar.
     Log("    PNG '%s': raster a=%d b=%d profundidad=%d formato=%d", texName.c_str(), a, b, c, d);
-    void* raster = g_rwRasterCreate(b, a, d, c);
+    // 3.1.34 (la otra IA tenia razon, verificado desensamblando libGTASA):
+    // RwRasterCreate es (ancho, alto, profundidad, formato). Antes se llamaba
+    // (b, a, d, c) = (alto, ancho, formato, profundidad): con texturas
+    // CUADRADAS no se nota (ancho=alto), pero las NO cuadradas salian
+    // retorcidas/diagonales porque el raster tenia el ancho y el alto
+    // cambiados y RwRasterSetFromImage copiaba las filas mal. Ademas la
+    // profundidad y el formato iban cambiados (1540 como profundidad, 32
+    // como formato). El orden correcto es (a, b, c, d).
+    void* raster = g_rwRasterCreate(a, b, c, d);
     if (!raster) { Log("    PNG '%s': RwRasterCreate fallo", path.c_str()); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
     if (!g_rwRasterSetFromImage(raster, image)) { Log("    PNG '%s': RwRasterSetFromImage fallo", path.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); if (g_rwImageDestroy) g_rwImageDestroy(image); return nullptr; }
     void* tex = g_rwTextureCreate(raster);
@@ -905,7 +913,10 @@ static void* CreateTextureFromRgba(int w, int h, const uint8_t* px, const std::s
     if (!fmt) { Log("    %s '%s': RwImageFindRasterFormat no encontro formato", kind, texName.c_str()); return nullptr; }
     if (b < 1 || a < 1) { Log("    %s '%s': dimensiones invalidas (%d x %d)", kind, texName.c_str(), a, b); return nullptr; }
     Log("    %s '%s': raster a=%d b=%d profundidad=%d formato=%d", kind, texName.c_str(), a, b, c, d);
-    void* raster = g_rwRasterCreate(b, a, d, c);
+    // 3.1.34: orden correcto de RwRasterCreate (ancho, alto, profundidad,
+    // formato) = (a, b, c, d). Antes era (b, a, d, c) y las texturas no
+    // cuadradas salian retorcidas (ver el mismo arreglo en LoadPngTexture).
+    void* raster = g_rwRasterCreate(a, b, c, d);
     if (!raster) { Log("    %s '%s': RwRasterCreate fallo", kind, texName.c_str()); return nullptr; }
     if (!g_rwRasterSetFromImage(raster, &img)) { Log("    %s '%s': RwRasterSetFromImage fallo", kind, texName.c_str()); if (g_rwRasterDestroy) g_rwRasterDestroy(raster); return nullptr; }
     void* tex = g_rwTextureCreate(raster);
