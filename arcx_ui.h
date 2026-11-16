@@ -321,6 +321,43 @@ static std::vector<Rect> g_frameRects;
 static const ImVec4 kWhite(1.0f, 1.0f, 1.0f, 1.0f);
 static const ImVec4 kRed(1.00f, 0.50f, 0.46f, 1.0f);
 static const ImVec4 kGrey(0.74f, 0.75f, 0.80f, 1.0f);
+static const ImVec4 kGradBlue(0.05f, 0.55f, 1.00f, 1.0f);   // azul del degradado del logo (izquierda)
+static const ImVec4 kGradPurple(0.65f, 0.20f, 0.95f, 1.0f); // morado del degradado del logo (derecha)
+static const ImVec4 kPink(0.95f, 0.25f, 0.55f, 1.0f);       // rosa de "Volver a ser CJ"
+
+// Borde con degradado (izquierda -> derecha) siguiendo un rectangulo redondeado.
+// Se dibuja como segmentos de linea gruesa con el color interpolado por la x;
+// un circulo en cada union evita huecos en las esquinas. Los lados rectos se
+// subdividen para que el color varie a lo largo de ellos.
+static void AddGradientBorder(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, float radius, float thick, const ImVec4& colL, const ImVec4& colR) {
+    const float w = p1.x - p0.x, h = p1.y - p0.y;
+    const float r = fminf(radius, fminf(w, h) * 0.5f);
+    const int ES = 8, AS = 5;                    // subdivisiones por lado recto y por arco
+    ImVec2 pts[64];
+    int n = 0;
+    auto push = [&](float x, float y) { if (n < 64) pts[n++] = ImVec2(x, y); };
+    for (int i = 0; i <= ES; i++) push(p0.x + r + (w - 2.0f * r) * i / (float)ES, p0.y);
+    for (int i = 1; i <= AS; i++) { float a = -1.5707963f + 1.5707963f * i / (float)AS; push(p1.x - r + cosf(a) * r, p0.y + r + sinf(a) * r); }
+    for (int i = 1; i <= ES; i++) push(p1.x, p0.y + r + (h - 2.0f * r) * i / (float)ES);
+    for (int i = 1; i <= AS; i++) { float a = 1.5707963f * i / (float)AS; push(p1.x - r + cosf(a) * r, p1.y - r + sinf(a) * r); }
+    for (int i = 1; i <= ES; i++) push(p1.x - r - (w - 2.0f * r) * i / (float)ES, p1.y);
+    for (int i = 1; i <= AS; i++) { float a = 1.5707963f + 1.5707963f * i / (float)AS; push(p0.x + r + cosf(a) * r, p1.y - r + sinf(a) * r); }
+    for (int i = 1; i <= ES; i++) push(p0.x, p1.y - r - (h - 2.0f * r) * i / (float)ES);
+    for (int i = 1; i <= AS; i++) { float a = 3.14159265f + 1.5707963f * i / (float)AS; push(p0.x + r + cosf(a) * r, p0.y + r + sinf(a) * r); }
+    for (int i = 0; i < n; i++) {
+        ImVec2 a = pts[i], b = pts[(i + 1) % n];
+        float f = ((a.x + b.x) * 0.5f - p0.x) / w;
+        if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+        ImU32 col = ImGui::GetColorU32(ImVec4(colL.x + (colR.x - colL.x) * f, colL.y + (colR.y - colL.y) * f,
+                                              colL.z + (colR.z - colL.z) * f, colL.w + (colR.w - colL.w) * f));
+        dl->AddLine(a, b, col, thick);
+        dl->AddCircleFilled(a, thick * 0.5f, col, 6);
+    }
+}
+// Degradado del borde segun el tema: el acento desplazado hacia azul (izquierda)
+// y hacia morado (derecha), como el anillo del logo.
+static ImVec4 GradL(const Pal& pal) { return Mix(pal.accent, kGradBlue, 0.55f); }
+static ImVec4 GradR(const Pal& pal) { return Mix(pal.accent, kGradPurple, 0.55f); }
 
 static void AddRect() {
     ImVec2 p = ImGui::GetWindowPos(), s = ImGui::GetWindowSize();
@@ -359,8 +396,12 @@ static int Segmented(const std::string& a, const std::string& b, int active, flo
         ImGui::PushID(200 + i);
         if (ImGui::InvisibleButton("##seg", ImVec2(half, h))) clicked = i;
         ImGui::PopID();
-        if (i == active)
-            dl->AddRectFilled(ImVec2(s.x + inset, s.y + inset), ImVec2(s.x + half - inset, s.y + h - inset), ImGui::GetColorU32(pal.accent), (h - 2.0f * inset) * 0.5f);
+        if (i == active) {
+            // pastilla activa violeta con borde en degradado azul -> morado (como el anillo del logo)
+            ImVec2 a0(s.x + inset, s.y + inset), b0(s.x + half - inset, s.y + h - inset);
+            dl->AddRectFilled(a0, b0, ImGui::GetColorU32(pal.accent), (h - 2.0f * inset) * 0.5f);
+            AddGradientBorder(dl, a0, b0, (h - 2.0f * inset) * 0.5f, 2.0f * u, GradL(pal), GradR(pal));
+        }
         const ImU32 col = (i == active) ? IM_COL32(255, 255, 255, 255) : ImGui::GetColorU32(kGrey);
         ImVec2 ts = ImGui::CalcTextSize(lab[i]->c_str());
         const float isz = h * 0.40f, iw = isz * 1.7f, gap = 12.0f * u;
@@ -387,7 +428,7 @@ static bool ArrowBtn(const char* id, int dir, float w, float h, bool enabled, fl
 }
 
 // ---- lista deslizable ----------------------------------------------------------------------------------
-enum { R_ACTION, R_SKIN, R_SWITCH, R_VALUE, R_COLORS, R_SLIDER, R_SECTION, R_INFO };
+enum { R_ACTION, R_SKIN, R_SWITCH, R_VALUE, R_COLORS, R_SLIDER, R_SECTION, R_INFO, R_CJ };
 struct Row {
     int kind = R_ACTION;
     std::string label, right;
@@ -415,6 +456,7 @@ static float RowH(const Row& r, float u) {
         case R_SECTION: return 44.0f * u;
         case R_SLIDER: return 98.0f * u;
         case R_INFO: return 46.0f * u;
+        case R_CJ: return 48.0f * u;                    // "Volver a ser CJ": solo texto rosa con barra
         case R_SKIN: return r.sub.empty() ? 64.0f * u : 88.0f * u;   // con subtitulo de origen, la fila es mas alta
         default: return 64.0f * u;
     }
@@ -509,6 +551,13 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
 
     // ---- dibujo ----
     const ImU32 white = IM_COL32(255, 255, 255, 255), acc = ImGui::GetColorU32(pal.accent), greyU = ImGui::GetColorU32(kGrey);
+    if (g_logoTex && std::string(id) == "##skins") {
+        // marca de agua del logo, muy tenue, centrada detras de la lista de skins
+        const float ws = fminf(size.x, size.y) * 0.75f;
+        const ImVec2 wc(p0.x + size.x * 0.5f, p0.y + size.y * 0.5f);
+        dl->AddImage((ImTextureID)(uintptr_t)g_logoTex, ImVec2(wc.x - ws * 0.5f, wc.y - ws * 0.5f), ImVec2(wc.x + ws * 0.5f, wc.y + ws * 0.5f),
+                     ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), IM_COL32(255, 255, 255, (int)(14.0f * g_alpha)));
+    }
     for (size_t i = 0; i < rows.size(); i++) {
         const Row& r = rows[i];
         const float h = RowH(r, u), y0 = p0.y + ys[i] - st.scroll;
@@ -529,10 +578,23 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             dl->AddText(fn, fs * 0.80f, ImVec2(a.x + 6.0f * u, midY - ts.y * 0.5f), greyU, r.label.c_str());
             continue;
         }
+        if (r.kind == R_CJ) {
+            // "Volver a ser CJ": texto rosa con barra vertical, sin fondo de fila
+            dl->AddRectFilled(ImVec2(a.x + 6.0f * u, y0 + 8.0f * u), ImVec2(a.x + 10.0f * u, y0 + h - 8.0f * u), ImGui::GetColorU32(kPink), 2.0f * u);
+            ImVec2 ts = ImGui::CalcTextSize(r.label.c_str());
+            dl->AddText(ImVec2(a.x + 22.0f * u, midY - ts.y * 0.5f), ImGui::GetColorU32(r.col), r.label.c_str());
+            continue;
+        }
         ImVec4 fill = pressed ? pal.rowActive : (r.selected ? Mix(pal.row, pal.accent, 0.42f) : pal.row);
         if (r.selected || pressed) fill.w = pal.row.w;
         dl->AddRectFilled(a, b, ImGui::GetColorU32(fill), 16.0f * u);
-        if (r.selected) dl->AddRectFilled(ImVec2(a.x + 2.0f * u, a.y + 12.0f * u), ImVec2(a.x + 7.0f * u, b.y - 12.0f * u), acc, 3.0f * u);
+        if (r.kind == R_SKIN) {
+            // borde de la fila de skin: fino violeta; la puesta lleva el degradado azul -> morado
+            if (r.selected) AddGradientBorder(dl, a, b, 16.0f * u, 2.5f * u, GradL(pal), GradR(pal));
+            else dl->AddRect(a, b, ImGui::GetColorU32(ImVec4(pal.accent.x, pal.accent.y, pal.accent.z, 0.35f * g_alpha)), 16.0f * u, 0, 1.5f * u);
+        } else if (r.selected) {
+            dl->AddRectFilled(ImVec2(a.x + 2.0f * u, a.y + 12.0f * u), ImVec2(a.x + 7.0f * u, b.y - 12.0f * u), acc, 3.0f * u);
+        }
 
         float tx = a.x + 22.0f * u;
         float reserve = 22.0f * u;                                   // espacio a la derecha para chip/valor
@@ -551,12 +613,18 @@ static ListResult ListView(const char* id, std::vector<Row>& rows, ListState& st
             dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + sh), r.sw ? acc : IM_COL32(74, 76, 88, 255), sh * 0.5f);
             dl->AddCircleFilled(ImVec2(r.sw ? x + w - sh * 0.5f : x + sh * 0.5f, midY), sh * 0.5f - 5.0f * u, white, 24);
             reserve = w + 40.0f * u;
-        } else if (r.kind == R_SKIN && !r.right.empty()) {            // pastilla "PUESTA"
+        } else if (r.kind == R_SKIN && !r.right.empty()) {            // marca + pastilla "PUESTA"
             ImVec2 ts = ImGui::CalcTextSize(r.right.c_str());
             const float padx = 16.0f * u, ph2 = ts.y + 14.0f * u, x1 = b.x - 18.0f * u, x0 = x1 - ts.x - padx * 2.0f;
             dl->AddRectFilled(ImVec2(x0, midY - ph2 * 0.5f), ImVec2(x1, midY + ph2 * 0.5f), acc, ph2 * 0.5f);
             dl->AddText(ImVec2(x0 + padx, midY - ts.y * 0.5f), white, r.right.c_str());
-            reserve = (x1 - x0) + 36.0f * u;
+            // circulo con palomita a la izquierda de la pastilla
+            const float cr = ph2 * 0.5f;
+            const ImVec2 cc(x0 - 14.0f * u - cr, midY);
+            dl->AddCircle(cc, cr, acc, 24, 2.5f * u);
+            dl->AddLine(ImVec2(cc.x - cr * 0.45f, cc.y), ImVec2(cc.x - cr * 0.08f, cc.y + cr * 0.38f), white, 2.5f * u);
+            dl->AddLine(ImVec2(cc.x - cr * 0.08f, cc.y + cr * 0.38f), ImVec2(cc.x + cr * 0.5f, cc.y - cr * 0.42f), white, 2.5f * u);
+            reserve = (x1 - (cc.x - cr)) + 36.0f * u;
         } else if (r.kind == R_VALUE) {
             std::string t = r.right + "  >";
             ImVec2 ts = ImGui::CalcTextSize(t.c_str());
@@ -702,7 +770,7 @@ static void BuildUI(float W, float H, float u) {
 
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(psz);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f * u);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);        // el borde lo dibujamos nosotros (degradado)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * u, 14.0f * u));
     ImGui::PushStyleColor(ImGuiCol_Border, pal.accent);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, pal.bg);
@@ -712,20 +780,38 @@ static void BuildUI(float W, float H, float u) {
     const ImVec2 wp = ImGui::GetWindowPos();
     ImFont* fn = ImGui::GetFont();
     const float fs = ImGui::GetFontSize();
+    // borde del panel en degradado azul -> morado (como el anillo del logo)
+    AddGradientBorder(dl, wp, ImVec2(wp.x + psz.x, wp.y + psz.y), 26.0f * u, 3.0f * u, GradL(pal), GradR(pal));
 
     // ---- cabecera: logo, nombre, credito y cerrar; arrastrar la cabecera mueve el panel ----
-    const float hh = 64.0f * u;
+    const float hh = 72.0f * u;
     const ImVec2 hp(wp.x + pad, wp.y + padY);
-    if (g_logoTex) dl->AddImage((ImTextureID)(uintptr_t)g_logoTex, hp, ImVec2(hp.x + hh, hp.y + hh));
+    if (g_logoTex) {
+        // logo circular con anillo violeta (el logo ya es redondo; su fondo negro
+        // se funde con el panel oscuro)
+        dl->AddImage((ImTextureID)(uintptr_t)g_logoTex, hp, ImVec2(hp.x + hh, hp.y + hh));
+        dl->AddCircle(ImVec2(hp.x + hh * 0.5f, hp.y + hh * 0.5f), hh * 0.5f, ImGui::GetColorU32(pal.accent), 48, 3.0f * u);
+    }
     else DrawIcon(dl, 0, hp.x + hh * 0.5f, hp.y + hh * 0.55f, hh * 0.6f, ImGui::GetColorU32(pal.accent), 3.0f * u);
-    dl->AddText(fn, fs * 1.12f, ImVec2(hp.x + hh + 16.0f * u, hp.y + 2.0f * u), ImGui::GetColorU32(pal.title), snap.title.c_str());
-    dl->AddText(fn, fs * 0.66f, ImVec2(hp.x + hh + 16.0f * u, hp.y + 36.0f * u), ImGui::GetColorU32(kGrey), "by Hunter09");
-    const float xr = 27.0f * u;                                       // boton cerrar (circulo con X)
+    // titulo: "PROJECT " en blanco + "ARCX" en violeta (como el logo)
+    {
+        const float tfs = fs * 1.25f;
+        std::string t = snap.title;
+        size_t sp = t.find_last_of(' ');
+        std::string pre = (sp == std::string::npos) ? "" : t.substr(0, sp + 1);
+        std::string suf = (sp == std::string::npos) ? t : t.substr(sp + 1);
+        ImVec2 preTs = fn->CalcTextSizeA(tfs, 100000.0f, 0.0f, pre.c_str());
+        dl->AddText(fn, tfs, ImVec2(hp.x + hh + 16.0f * u, hp.y + 2.0f * u), IM_COL32(255, 255, 255, 255), pre.c_str());
+        dl->AddText(fn, tfs, ImVec2(hp.x + hh + 16.0f * u + preTs.x, hp.y + 2.0f * u), ImGui::GetColorU32(pal.accent), suf.c_str());
+    }
+    dl->AddText(fn, fs * 0.66f, ImVec2(hp.x + hh + 16.0f * u, hp.y + 40.0f * u), ImGui::GetColorU32(kGrey), "by Daniel AG");
+    const float xr = 27.0f * u;                                       // boton cerrar (circulo oscuro con anillo morado y X)
     const ImVec2 xc(wp.x + psz.x - pad - xr, hp.y + hh * 0.5f);
     ImGui::SetCursorScreenPos(ImVec2(xc.x - xr, xc.y - xr));
     const bool closePressed = ImGui::InvisibleButton("##close", ImVec2(xr * 2.0f, xr * 2.0f));
     const bool closeActive = ImGui::IsItemActive();
-    dl->AddCircleFilled(xc, xr, closeActive ? IM_COL32(210, 60, 60, 255) : IM_COL32(150, 36, 36, 255), 32);
+    dl->AddCircleFilled(xc, xr, closeActive ? IM_COL32(60, 55, 80, 255) : IM_COL32(22, 22, 30, 255), 32);
+    dl->AddCircle(xc, xr, ImGui::GetColorU32(GradR(pal)), 32, 3.0f * u);
     dl->AddLine(ImVec2(xc.x - xr * 0.34f, xc.y - xr * 0.34f), ImVec2(xc.x + xr * 0.34f, xc.y + xr * 0.34f), IM_COL32(255, 255, 255, 255), 3.0f * u);
     dl->AddLine(ImVec2(xc.x + xr * 0.34f, xc.y - xr * 0.34f), ImVec2(xc.x - xr * 0.34f, xc.y + xr * 0.34f), IM_COL32(255, 255, 255, 255), 3.0f * u);
     if (closePressed) g_open = false;
@@ -759,7 +845,7 @@ static void BuildUI(float W, float H, float u) {
         if (pages < 1) pages = 1;
         if (g_page >= pages) g_page = pages - 1;
         if (g_page < 0) g_page = 0;
-        Row cj; cj.kind = R_ACTION; cj.label = Tr(K_CJ); cj.col = kRed; cj.action = 2; rows.push_back(cj);
+        Row cj; cj.kind = R_CJ; cj.label = Tr(K_CJ); cj.col = kPink; cj.action = 2; rows.push_back(cj);
         for (int i = g_page * kMaxRowsPerPage; i < total && i < (g_page + 1) * kMaxRowsPerPage; i++) {
             Row r; r.kind = R_SKIN; r.label = snap.skins[i]; r.action = 1; r.arg = snap.skins[i];
             r.selected = (snap.skins[i] == snap.current);
@@ -794,7 +880,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.35-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.36-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
@@ -822,7 +908,15 @@ static void BuildUI(float W, float H, float u) {
         else if (g_screen == 0) snprintf(hint, sizeof hint, Tr(K_COUNT_FMT).c_str(), (int)snap.skins.size());
         else snprintf(hint, sizeof hint, "%s", Tr(K_HINT).c_str());
         const ImU32 hcol = snap.status.empty() ? ImGui::GetColorU32(kGrey) : IM_COL32(255, 178, 64, 255);
-        dl->AddText(fn, fs * 0.74f, ImVec2(wp.x + pad, footY + footH * 0.5f - fs * 0.37f), hcol, hint);
+        float tx = wp.x + pad;
+        if (g_screen == 0 && snap.status.empty()) {
+            // icono de persona antes del conteo de skins
+            const float ix = tx + 8.0f * u, iy = footY + footH * 0.5f, hr = 7.0f * u;
+            dl->AddCircleFilled(ImVec2(ix, iy - hr * 0.9f), hr, hcol, 16);
+            dl->AddRectFilled(ImVec2(ix - hr * 1.1f, iy + hr * 0.1f), ImVec2(ix + hr * 1.1f, iy + hr * 1.1f), hcol, hr * 0.5f);
+            tx += 30.0f * u;
+        }
+        dl->AddText(fn, fs * 0.74f, ImVec2(tx, footY + footH * 0.5f - fs * 0.37f), hcol, hint);
     }
     const float gripS = 50.0f * u;
     const ImVec2 gp(wp.x + psz.x - gripS - 8.0f * u, wp.y + psz.y - gripS - 8.0f * u);
