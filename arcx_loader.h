@@ -1171,6 +1171,26 @@ static void* FindPngTexture(const char* name) {
     return it != g_pngTextures.end() ? it->second : nullptr;
 }
 
+// ---- Textura transparente 1x1 (3.1.32) ----
+// Cuando el juego pide una textura y NI el diccionario nativo NI nuestra
+// cache la tienen, devolver null dejaba el material negro/oscuro. Eso es
+// justo lo que pasaba con el chaleco de Ghost en ARCXLoader: el juego pide
+// 'vest' y 'jeans' (la ropa de CJ) al cargar el DFF del personaje especial,
+// y como no estan ni en el .txd de Ghost ni en player.txd con el diccionario
+// actual, salian null y la ropa de CJ se dibujaba oscura TAPANDO el chaleco
+// propio de Ghost. En ZyZ no pasa porque Ghost se carga como ped normal
+// (sin sistema de ropa de CJ). La solucion es devolver una textura 1x1
+// totalmente transparente: la ropa de CJ se vuelve invisible y el chaleco
+// propio del .dff queda a la vista. Se crea una sola vez (pereza) y se
+// guarda; el contador de referencias se sube en el hook como con la cache.
+static void* g_transparentTex = nullptr;
+static void* GetTransparentTexture() {
+    if (g_transparentTex) return g_transparentTex;
+    static const uint8_t px[4] = {0, 0, 0, 0};   // RGBA totalmente transparente
+    g_transparentTex = CreateTextureFromRgba(1, 1, px, "arcx_transparente", "FALLBACK");
+    return g_transparentTex;
+}
+
 // ---- Auditor de texturas del .dff (3.1.28) ----
 // Lee el .dff de una skin propia y saca los nombres de textura que piden
 // sus materiales (chunk Texture 0x6: Struct con el filtro + String con el

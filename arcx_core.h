@@ -906,8 +906,9 @@ static void CGame_Process_hook() {
 // de PNG/TXD por nombre. El contador de referencias se sube igual que hace
 // RwTextureRead (+0x64) solo cuando se sirve desde la cache (el original ya
 // lo sube cuando devuelve una textura). Si el nombre no es una PNG nuestra
-// y el original tampoco la tiene, se devuelve null (lo que devolvio el
-// original).
+// y el original tampoco la tiene, se devuelve una textura 1x1 transparente
+// (3.1.32) en vez de null: con null el material salia negro/oscuro, y eso
+// tapaba el chaleco de Ghost con la ropa oscura de CJ ('vest'/'jeans').
 static void* RwTextureRead_hook(const char* name, const char* mask) {
     // 3.1.29: primero el original (diccionario nativo, como ZyZ). Si lo
     // encuentra, esa es la textura correcta del modelo.
@@ -930,7 +931,22 @@ static void* RwTextureRead_hook(const char* name, const char* mask) {
         if (s_missCount < 40 && s_missLogged.find(name) == s_missLogged.end()) {
             s_missLogged[name] = true;
             s_missCount++;
-            LOGI("RwTextureRead: textura pedida y NO en nuestras PNG: '%s'", name);
+            LOGI("RwTextureRead: textura pedida y NO en nuestras PNG: '%s' (se devuelve transparente)", name);
+        }
+        // 3.1.32: en vez de devolver null (el material salia negro/oscuro),
+        // se devuelve una textura 1x1 transparente. El caso que lo motivo:
+        // al aplicar Ghost como personaje especial el juego pide 'vest' y
+        // 'jeans' (ropa de CJ) y ni el diccionario nativo ni la cache las
+        // tienen; con null la ropa de CJ se dibujaba oscura tapando el
+        // chaleco propio de Ghost, mientras que en ZyZ (ped normal, sin
+        // ropa de CJ) el chaleco se veia bien. Transparente = la ropa de CJ
+        // no se ve y el chaleco del .dff queda a la vista. Se sube el
+        // contador igual que con la cache (+0x64).
+        void* fallback = loader::GetTransparentTexture();
+        if (fallback) {
+            uint32_t rc = *(uint32_t*)((char*)fallback + 0x64);
+            *(uint32_t*)((char*)fallback + 0x64) = rc + 1;
+            return fallback;
         }
     }
     return native;
