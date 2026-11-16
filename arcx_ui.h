@@ -141,6 +141,7 @@ static void CreateLogoTexture() {
 static int g_theme = 0;                       // 0 por defecto, 1 rojo, 2 azul, 3 verde, 4 naranja
 static ImVec4 g_customCol(0.45f, 0.30f, 0.95f, 1.0f);   // color RGB personalizado (por defecto, el violeta ARCX)
 static bool g_useCustom = false;              // true = usar el color personalizado en vez del tema
+static bool g_showPicker = true;              // true = el panel selector de colores esta visible (3.1.40: tocar el arcoiris otra vez lo oculta sin quitar el color)
 static int g_lang = 0;                        // 0 espanol, 1 ingles, 2 indonesio
 static float g_btnMul = 1.0f;                 // tamano del boton
 static float g_alpha = 1.0f;                  // opacidad del menu y del boton
@@ -167,6 +168,7 @@ static void SaveMenuSettings() {
         snprintf(b, sizeof b, "%.3f", g_customCol.y); m["custom_g"] = b;
         snprintf(b, sizeof b, "%.3f", g_customCol.z); m["custom_b"] = b;
         m["custom_use"] = g_useCustom ? "1" : "0";
+        m["picker_show"] = g_showPicker ? "1" : "0";   // si el panel selector esta visible o escondido
         snprintf(b, sizeof b, "%.2f", bm); m["button_size"] = b;
         snprintf(b, sizeof b, "%.2f", al); m["opacity"] = b;
         snprintf(b, sizeof b, "%.4f", bx); m["button_x"] = b;
@@ -187,6 +189,7 @@ static void LoadMenuSettings() {
     g_customCol.y = Clampf(vsa::GetFloat(ini, "Menu", "custom_g", 0.30f), 0.0f, 1.0f);
     g_customCol.z = Clampf(vsa::GetFloat(ini, "Menu", "custom_b", 0.95f), 0.0f, 1.0f);
     g_useCustom = vsa::GetInt(ini, "Menu", "custom_use", 0) == 1;
+    g_showPicker = vsa::GetInt(ini, "Menu", "picker_show", 1) == 1;
     g_btnMul = Clampf(vsa::GetFloat(ini, "Menu", "button_size", 1.0f), kBtnLo, kBtnHi);
     g_alpha = Clampf(vsa::GetFloat(ini, "Menu", "opacity", 1.0f), kAlphaLo, kAlphaHi);
     g_btnFx = Clampf(vsa::GetFloat(ini, "Menu", "button_x", 0.012f), 0.0f, 1.0f);
@@ -1009,7 +1012,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_LOCK); r.action = 11; r.sw = g_btnLock; rows.push_back(r); }
         section(K_SEC_COLOR);
         { Row r; r.kind = R_COLORS; r.label = Tr(K_THEME) + ": " + (g_useCustom ? Tr(K_CUSTOM) : Loc(kThemeName[g_lang][g_theme])); r.action = 7; rows.push_back(r); }
-        if (g_useCustom) { Row r; r.kind = R_PICKER; r.label = ""; r.action = 24; rows.push_back(r); }   // el panel solo aparece al elegir el cuadro arcoiris (color personalizado); con un predeterminado se oculta (3.1.39)
+        if (g_useCustom && g_showPicker) { Row r; r.kind = R_PICKER; r.label = ""; r.action = 24; rows.push_back(r); }   // el panel solo aparece con el color personalizado y si no se escondio tocando el arcoiris (3.1.40)
         section(K_SEC_ZYZ);
         { Row r; r.kind = R_SWITCH; r.label = Tr(K_ZYZ_ON); r.action = 15; r.sw = snap.zyzOn; r.locked = !snap.zyzDetected; if (r.locked) r.col = kGrey; rows.push_back(r); }
         if (!snap.zyzDetected) { Row r; r.kind = R_INFO; r.label = Tr(K_ZYZ_LOCKED); rows.push_back(r); }
@@ -1027,7 +1030,7 @@ static void BuildUI(float W, float H, float u) {
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_BTNSIZE); r.action = 13; r.val = &g_btnMul; r.lo = kBtnLo; r.hi = kBtnHi; rows.push_back(r); }
         { Row r; r.kind = R_SLIDER; r.label = Tr(K_OPACITY); r.action = 14; r.val = &g_alpha; r.lo = kAlphaLo; r.hi = kAlphaHi; rows.push_back(r); }
         section(K_SEC_ABOUT);
-        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.39-beta  -  by Hunter09"; rows.push_back(r); }
+        { Row r; r.kind = R_INFO; r.label = "Project ARCX 3.1.40-beta  -  by Hunter09"; rows.push_back(r); }
     }
     ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, listTop));
     ListResult lr = ListView(g_screen == 0 ? "##skins" : "##ajustes", rows, g_lists[g_screen], listSize, u, pal);
@@ -1044,8 +1047,14 @@ static void BuildUI(float W, float H, float u) {
         else if (r.action == 18) core::Command("RESCAN_LOADER");
         else if (r.action == 5) { g_lang = (g_lang + 1) % 3; SaveMenuSettings(); }
         else if (r.action == 7 && lr.sub >= 0) {
-            if (lr.sub == 5) g_useCustom = true;   // 6o cuadro = color RGB personalizado
-            else { g_useCustom = false; g_theme = lr.sub; }
+            if (lr.sub == 5) {
+                // 6o cuadro (arcoiris) = color personalizado. Si ya estaba
+                // activo, tocarlo otra vez solo esconde/muestra el panel:
+                // el color personalizado NO se quita (3.1.40).
+                if (g_useCustom) g_showPicker = !g_showPicker;
+                else { g_useCustom = true; g_showPicker = true; }
+            }
+            else { g_useCustom = false; g_showPicker = false; g_theme = lr.sub; }
             SaveMenuSettings();
         }
         else if (r.action == 11) { g_btnLock = !g_btnLock; SaveMenuSettings(); }
